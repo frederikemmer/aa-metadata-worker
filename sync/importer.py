@@ -1,0 +1,385 @@
+"""Streaming import pipeline: compressed stream -> parser -> normalizer ->
+batch buffer -> PostgreSQL upsert (merge in application layer).
+
+Memory usage is bounded by SYNC_BATCH_SIZE regardless of file size. The merge
+implementation lives in common.records.merge_records and is used both here and
+in tests, so there is exactly one definition of the strategy.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import logging
+import re
+import signal
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import psycopg
+import zstandard
+
+from common.config import Settings, load_settings
+from common.normalize import (
+    derive_work_key,
+    md5_to_hex,
+    normalize_text,
+)
+from common.records import NormalizedRecord, merge_records, quality_score
+from sync import state
+from sync.sources import get_adapter
+
+logger = logging.getLogger(__name__)
+
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+_UPSERT_SQL = """
+INSERT INTO metadata_records (
+    md5, title, title_norm, authors, author_tokens, publisher, publication_year,
+    languages, extension, filesize, isbn10, isbn13, doi, oclc, openlibrary_ids,
+    work_key, source_collection, source_record_id, aacid, source_timestamp,
+    quality_score, deleted, removed_reason, ipfs_cid
+) VALUES (
+    %(md5)s, %(title)s, %(title_norm)s, %(authors)s, %(author_tokens)s, %(publisher)s,
+    %(publication_year)s, %(languages)s, %(extension)s, %(filesize)s,
+    %(isbn10)s, %(isbn13)s, %(doi)s, %(oclc)s, %(openlibrary_ids)s,
+    %(work_key)s, %(source_collection)s, %(source_record_id)s, %(aacid)s,
+    %(source_timestamp)s, %(quality_score)s, %(deleted)s, %(removed_reason)s, %(ipfs_cid)s
+)
+ON CONFLICT (md5) DO UPDATE SET
+    title = EXCLUDED.title,
+    title_norm = EXCLUDED.title_norm,
+    authors = EXCLUDED.authors,
+    author_tokens = EXCLUDED.author_tokens,
+    publisher = EXCLUDED.publisher,
+    publication_year = EXCLUDED.publication_year,
+    languages = EXCLUDED.languages,
+    extension = EXCLUDED.extension,
+    filesize = EXCLUDED.filesize,
+    isbn10 = EXCLUDED.isbn10,
+    isbn13 = EXCLUDED.isbn13,
+    doi = EXCLUDED.doi,
+    oclc = EXCLUDED.oclc,
+    openlibrary_ids = EXCLUDED.openlibrary_ids,
+    work_key = EXCLUDED.work_key,
+    source_collection = EXCLUDED.source_collection,
+    source_record_id = EXCLUDED.source_record_id,
+    aacid = EXCLUDED.aacid,
+    source_timestamp = COALESCE(EXCLUDED.source_timestamp, metadata_records.source_timestamp),
+    quality_score = GREATEST(metadata_records.quality_score, EXCLUDED.quality_score),
+    deleted = EXCLUDED.deleted,
+    removed_reason = EXCLUDED.removed_reason,
+    ipfs_cid = COALESCE(EXCLUDED.ipfs_cid, metadata_records.ipfs_cid)
+"""
+
+_SELECT_EXISTING_SQL = """
+SELECT md5, title, authors, publisher, publication_year, languages, extension,
+       filesize, isbn10, isbn13, doi, oclc, openlibrary_ids, source_collection,
+       source_record_id, aacid, source_timestamp, quality_score, deleted,
+       removed_reason, ipfs_cid
+FROM metadata_records
+WHERE md5 = ANY(%(md5s)s)
+"""
+
+_COLUMNS = (
+    "md5",
+    "title",
+    "authors",
+    "publisher",
+    "publication_year",
+    "languages",
+    "extension",
+    "filesize",
+    "isbn10",
+    "isbn13",
+    "doi",
+    "oclc",
+    "openlibrary_ids",
+    "source_collection",
+    "source_record_id",
+    "aacid",
+    "source_timestamp",
+    "quality_score",
+    "deleted",
+    "removed_reason",
+    "ipfs_cid",
+)
+
+
+class GracefulShutdown(RuntimeError):
+    """Raised between batches when SIGTERM was received."""
+
+
+_shutdown_requested = False
+
+
+def request_shutdown(signum, _frame) -> None:  # pragma: no cover - signal plumbing
+    global _shutdown_requested
+    _shutdown_requested = True
+    logger.info("Shutdown requested (%s); finishing current batch...", signum)
+
+
+def install_signal_handlers() -> None:
+    global _shutdown_requested
+    _shutdown_requested = False
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
+
+
+@dataclass
+class ImportStats:
+    seen: int = 0
+    inserted: int = 0
+    updated: int = 0
+    skipped: int = 0
+    discarded: int = 0
+    failed: int = 0
+    batches: int = 0
+    error_samples: list[str] = field(default_factory=list)
+
+
+def record_to_params(record: NormalizedRecord) -> dict:
+    """NormalizedRecord -> DB row dict incl. derived normalized columns."""
+    title_norm = normalize_text(record.title)
+    author_norm_names = [normalize_text(a) for a in record.authors if normalize_text(a)]
+    author_tokens: list[str] = []
+    for name in author_norm_names:
+        for token in _TOKEN_RE.findall(name):
+            if token not in author_tokens:
+                author_tokens.append(token)
+    return {
+        "md5": record.md5,
+        "title": record.title or "",
+        "title_norm": title_norm,
+        "authors": [a for a in record.authors if a],
+        "author_tokens": author_tokens,
+        "publisher": record.publisher,
+        "publication_year": record.publication_year,
+        "languages": record.languages,
+        "extension": record.extension,
+        "filesize": record.filesize,
+        "isbn10": record.isbn10,
+        "isbn13": record.isbn13,
+        "doi": record.doi,
+        "oclc": record.oclc,
+        "openlibrary_ids": record.openlibrary_ids,
+        "work_key": derive_work_key(record.isbn13, record.isbn10, record.doi, record.openlibrary_ids),
+        "source_collection": record.source_collection,
+        "source_record_id": record.source_record_id,
+        "aacid": record.aacid,
+        "source_timestamp": record.source_timestamp,
+        "quality_score": quality_score(record),
+        "deleted": record.deleted,
+        "removed_reason": record.removed_reason,
+        "ipfs_cid": record.ipfs_cid,
+    }
+
+
+def _row_to_record(row: tuple) -> tuple[NormalizedRecord, int]:
+    data = dict(zip(_COLUMNS, row, strict=True))
+    record = NormalizedRecord(
+        md5=data["md5"],
+        title=data["title"] or "",
+        authors=list(data["authors"] or []),
+        publisher=data["publisher"],
+        publication_year=data["publication_year"],
+        languages=list(data["languages"] or []),
+        extension=data["extension"],
+        filesize=data["filesize"],
+        isbn13=list(data["isbn13"] or []),
+        isbn10=list(data["isbn10"] or []),
+        doi=list(data["doi"] or []),
+        oclc=list(data["oclc"] or []),
+        openlibrary_ids=list(data["openlibrary_ids"] or []),
+        source_collection=data["source_collection"],
+        source_record_id=data["source_record_id"],
+        aacid=data["aacid"],
+        source_timestamp=data["source_timestamp"],
+        deleted=bool(data["deleted"]),
+        removed_reason=data["removed_reason"],
+        ipfs_cid=data["ipfs_cid"],
+    )
+    return record, int(data["quality_score"])
+
+
+def process_batch(
+    conn: psycopg.Connection,
+    records: list[tuple[NormalizedRecord, str]],
+    stats: ImportStats,
+) -> None:
+    """Merge one batch of parsed records into the database atomically.
+
+    `records` items are (record, raw_line_for_errors). Duplicates inside a
+    batch are folded first so every md5 appears once per statement.
+    """
+    # Fold duplicates within the batch.
+    folded: dict[bytes, tuple[NormalizedRecord, int]] = {}
+    for record, _raw in records:
+        score = quality_score(record)
+        existing_entry = folded.get(record.md5)
+        if existing_entry is None:
+            folded[record.md5] = (record, score)
+        else:
+            merged, merged_score = merge_records(existing_entry[0], existing_entry[1], record)
+            folded[record.md5] = (merged, merged_score)
+
+    md5_list = list(folded.keys())
+    params = {"md5s": md5_list}
+    existing_rows = conn.execute(_SELECT_EXISTING_SQL, params).fetchall()
+    existing_map: dict[bytes, tuple[NormalizedRecord, int]] = {}
+    for row in existing_rows:
+        rec, score = _row_to_record(row)
+        existing_map[rec.md5] = (rec, score)
+
+    final_rows: list[dict] = []
+    inserted = 0
+    updated = 0
+    for md5 in md5_list:
+        incoming, incoming_score = folded[md5]
+        current = existing_map.get(md5)
+        if current is None:
+            final_rows.append({**record_to_params(incoming), "quality_score": incoming_score})
+            inserted += 1
+        else:
+            merged, merged_score = merge_records(current[0], current[1], incoming)
+            final_rows.append({**record_to_params(merged), "quality_score": merged_score})
+            updated += 1
+
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.executemany(_UPSERT_SQL, final_rows)
+
+    stats.inserted += inserted
+    stats.updated += updated
+    stats.batches += 1
+
+
+def iter_jsonl(payload_path: Path):
+    """Stream-decompress a .jsonl(.seekable).zst file line by line."""
+    with open(payload_path, "rb") as raw_file:
+        decompressor = zstandard.ZstdDecompressor(max_window_size=2**27)
+        stream = decompressor.stream_reader(raw_file)
+        text_stream = io.TextIOWrapper(stream, encoding="utf-8", errors="replace")
+        for line in text_stream:
+            line = line.strip()
+            if line:
+                yield line
+
+
+def _log_error_samples(payload_path: Path, stats: ImportStats, max_samples: int = 5) -> None:
+    """Log a few representative parse-failure samples (release-level diagnostics)."""
+    if stats.failed == 0:
+        return
+    logger.error(
+        "Import failures in %s (%d failed): %d sample(s): %s",
+        payload_path.name[:60],
+        stats.failed,
+        min(max_samples, len(stats.error_samples)),
+        " || ".join(stats.error_samples[:max_samples]),
+    )
+
+
+def import_release(
+    conn: psycopg.Connection,
+    collection: str,
+    payload_path: Path,
+    release_id: int,
+    settings: Settings | None = None,
+) -> ImportStats:
+    """Import one release payload with per-batch commits and error-rate abort."""
+    settings = settings or load_settings()
+    adapter = get_adapter(collection)
+    stats = ImportStats()
+    batch_size = max(1, settings.sync_batch_size)
+    batch: list[tuple[NormalizedRecord, str]] = []
+
+    state.set_release_status(conn, release_id, "importing")
+    logger.info("Importing %s from %s", collection, payload_path.name)
+
+    flushed = {"seen": 0, "inserted": 0, "updated": 0, "skipped": 0, "discarded": 0, "failed": 0}
+
+    def flush() -> None:
+        nonlocal batch
+        if not batch:
+            return
+        process_batch(conn, batch, stats)
+        state.update_release_counters(
+            conn,
+            release_id,
+            seen=stats.seen - flushed["seen"],
+            inserted=stats.inserted - flushed["inserted"],
+            updated=stats.updated - flushed["updated"],
+            skipped=stats.skipped - flushed["skipped"],
+            discarded=stats.discarded - flushed["discarded"],
+            failed=stats.failed - flushed["failed"],
+        )
+        for key in flushed:
+            flushed[key] = getattr(stats, key)
+        batch = []
+
+    for line in iter_jsonl(payload_path):
+        if _shutdown_requested:
+            flush()
+            raise GracefulShutdown("SIGTERM received during import")
+
+        stats.seen += 1
+        try:
+            raw = json.loads(line)
+            parsed = adapter.parse(raw)
+            if not parsed:
+                stats.skipped += 1
+            else:
+                for record in parsed:
+                    if record.discarded:
+                        stats.discarded += 1
+                    else:
+                        batch.append((record, line))
+        except Exception as error:  # noqa: BLE001 - single broken record must not kill import
+            stats.failed += 1
+            if len(stats.error_samples) < 20:
+                stats.error_samples.append(f"{type(error).__name__}: {error} :: {line[:200]}")
+
+        if len(batch) >= batch_size:
+            flush()
+            if stats.seen >= 10000 and stats.failed / max(stats.seen, 1) > settings.sync_error_abort_rate:
+                flush()
+                _log_error_samples(payload_path, stats)
+                raise RuntimeError(
+                    f"Error rate {stats.failed}/{stats.seen} exceeds threshold "
+                    f"{settings.sync_error_abort_rate:.2%}; aborting release import."
+                )
+
+    flush()
+
+    failure_rate = stats.failed / max(stats.seen, 1)
+    if stats.seen == 0:
+        raise RuntimeError("Payload contained no records; refusing to mark completed.")
+    if failure_rate > settings.sync_error_abort_rate:
+        _log_error_samples(payload_path, stats)
+        raise RuntimeError(
+            f"Final error rate {failure_rate:.2%} exceeds threshold {settings.sync_error_abort_rate:.2%}."
+        )
+    return stats
+
+
+def validate_import(conn: psycopg.Connection, release_id: int, stats: ImportStats) -> None:
+    """Post-import sanity gate before a release may be marked completed."""
+    state.set_release_status(conn, release_id, "validating")
+    if stats.seen == 0:
+        raise RuntimeError("Validation failed: no records seen.")
+    if stats.inserted + stats.updated == 0 and stats.skipped == stats.seen:
+        # Fully idempotent re-import of an identical payload is legitimate.
+        logger.info("All %d records were already present (skipped).", stats.skipped)
+
+
+def delete_payload(payload_path: Path) -> None:
+    try:
+        if payload_path.exists():
+            payload_path.unlink()
+            logger.info("Deleted temporary payload %s", payload_path)
+    except OSError as error:  # pragma: no cover - filesystem dependent
+        logger.warning("Could not delete payload %s: %s", payload_path, error)
+
+
+def hexdump_md5(md5: bytes) -> str:  # pragma: no cover - debug helper
+    return md5_to_hex(md5)

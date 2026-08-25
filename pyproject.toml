@@ -1,0 +1,33 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+testpaths = ["tests"]
+addopts = """
+--verbose
+--strict-markers
+--tb=short
+"""
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "unit: Unit tests that test individual functions/methods",
+    "integration: Integration tests that require a real PostgreSQL (docker)",
+    "api: API endpoint tests",
+    "sync: Tests for sync/discovery/import logic",
+    "slow: Tests that take a long time to run",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["B008"]  # FastAPI Depends() in defaults is idiomatic
+
+[tool.coverage.run]
+branch = true
+source = ["app", "common", "sync"]

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AA Metadata Worker – Fortschritt</title>
+<style>
+  :root{--bg:#0f1216;--card:#171c23;--line:#232b35;--text:#dbe4ee;--dim:#8494a7;
+        --ok:#3fb96f;--warn:#e2b93b;--err:#e05d5d;--run:#4aa3e0;--accent:#5b8dd9}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;
+       padding:24px;max-width:1100px;margin:0 auto}
+  h1{font-size:20px;font-weight:600;margin-bottom:2px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:18px}
+  .grid{display:grid;gap:14px}
+  .cards{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:8px}
+  .big{font-size:22px;font-weight:600}
+  .small{font-size:12px;color:var(--dim)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{color:var(--dim);font-weight:500;text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);
+     font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:11px;font-weight:600}
+  .p-completed{background:#12351f;color:var(--ok)} .p-failed,.p-blocked_storage{background:#3a1a1a;color:var(--err)}
+  .p-downloading,.p-importing,.p-validating{background:#15293c;color:var(--run)}
+  .p-discovered,.p-not_discovered{background:#252b33;color:var(--dim)}
+  .bar{height:8px;background:#222a34;border-radius:99px;overflow:hidden;margin-top:6px}
+  .bar>div{height:100%;background:var(--accent);border-radius:99px;transition:width .8s ease}
+  .bar.warn>div{background:var(--warn)} .bar.stop>div{background:var(--err)}
+  .counters{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:8px;font-size:12px;color:var(--dim)}
+  .counters b{color:var(--text);font-variant-numeric:tabular-nums}
+  section{margin-top:16px}
+  .err{color:var(--err);font-size:12px;white-space:pre-wrap;word-break:break-all}
+  .idle{color:var(--dim);padding:10px 0}
+  .refresh{float:right;color:var(--dim);font-size:11px}
+  .ctrl{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  button{background:#1f2937;color:var(--text);border:1px solid var(--line);border-radius:8px;
+         padding:8px 14px;font-size:13px;cursor:pointer;font-weight:600}
+  button:hover{background:#28344a;border-color:var(--accent)}
+  button.primary{background:#1d3a5f;border-color:#2f5a94}
+  button.warn{background:#4a2323;border-color:#7a3535}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .keybox{margin-left:auto;display:flex;gap:6px;align-items:center}
+  input{background:#10151b;border:1px solid var(--line);color:var(--text);border-radius:6px;
+        padding:6px 8px;font-size:12px;width:170px}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#1d3a5f;
+         color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;display:none;z-index:9}
+</style>
+</head>
+<body>
+<h1>AA Metadata Worker <span class="refresh" id="upd"></span></h1>
+<div class="sub">Metadaten-Index aus Anna's Archive · Aktualisierung alle 2 s</div>
+<div class="toast" id="toast"></div>
+
+<section class="grid cards" id="cards"></section>
+
+<section class="card">
+  <h2>Steuerung</h2>
+  <div class="ctrl">
+    <button class="primary" id="btn-run">▶ Jetzt synchronisieren</button>
+    <button id="btn-pause">⏸ Pause</button>
+    <span class="small" id="ctrl-state"></span>
+    <span class="keybox">
+      <input type="password" id="apikey" placeholder="API-Key (falls gesetzt)">
+      <span class="small" style="cursor:pointer" onclick="localStorage.removeItem('aaApiKey');document.getElementById('apikey').value='';">✕</span>
+    </span>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Aktueller Sync</h2>
+  <div id="active"><div class="idle">Kein Sync aktiv.</div></div>
+</section>
+
+<section class="card">
+  <h2>Collections</h2>
+  <table id="colls"><thead><tr>
+    <th>Collection</th><th>Status</th><th class="num">Records (neu/aktualisiert)</th>
+    <th class="num">Verworfen</th><th class="num">Fehler</th><th>Fertig am</th>
+  </tr></thead><tbody></tbody></table>
+</section>
+
+<section class="card">
+  <h2>Letzte Releases</h2>
+  <table id="recent"><thead><tr>
+    <th>Collection</th><th>Release</th><th>Status</th><th class="num">Gesehen</th><th>Fehlermeldung</th>
+  </tr></thead><tbody></tbody></table>
+</section>
+
+<script>
+const fmt = n => (n ?? 0).toLocaleString('de-DE');
+const gib = b => ((b||0)/1073741824).toFixed(2)+' GiB';
+const trunc = (s,n=46) => !s ? '' : (s.length>n ? s.slice(0,n)+'…' : s);
+const pill = s => `<span class="pill p-${s}">${s}</span>`;
+let prevActiveKey = null, prevCount = null;
+let control = {paused:false, enabled:true};
+
+function toast(msg, ok=true){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  t.style.background = ok ? '#1d3a5f' : '#5f1d1d';
+  setTimeout(()=>{ t.style.display='none'; }, 3500);
+}
+
+function authHeaders(){
+  const k = document.getElementById('apikey').value.trim();
+  return k ? {'Authorization': 'Bearer '+k} : {};
+}
+
+async function sendCommand(action){
+  const labels = {run_now:'Sync gestartet – Worker übernimmt in wenigen Sekunden.',
+                  pause:'Pause angefordert.', resume:'Fortsetzen angefordert.'};
+  try{
+    const r = await fetch('/api/v1/sync/commands', {
+      method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({action})
+    });
+    if(r.status===401){ toast('Falscher/fehlender API-Key (unten eintragen).', false); return; }
+    if(!r.ok){ const e = await r.json().catch(()=>({})); toast(e.detail||'Fehler', false); return; }
+    toast(labels[action]||'OK');
+    tick();
+  }catch(e){ toast('Netzwerkfehler', false); }
+}
+
+document.getElementById('btn-run').onclick = () => {
+  if(confirm('Jetzt einen Sync-Lauf starten? Es werden neue Metadaten-Torrents heruntergeladen und importiert.'))
+    sendCommand('run_now');
+};
+document.getElementById('btn-pause').onclick = () => {
+  if(control.paused){
+    if(confirm('Sync wieder fortsetzen (Zeitplan aktiv)?')) sendCommand('resume');
+  } else {
+    if(confirm('Sync pausieren? Ein laufender Import wird sauber unterbrochen und später fortgesetzt.'))
+      sendCommand('pause');
+  }
+};
+const keyInput = document.getElementById('apikey');
+keyInput.value = localStorage.getItem('aaApiKey') || '';
+keyInput.oninput = () => localStorage.setItem('aaApiKey', keyInput.value.trim());
+
+function renderControl(){
+  const b = document.getElementById('btn-pause');
+  b.textContent = control.paused ? '▶ Fortsetzen' : '⏸ Pause';
+  b.classList.toggle('warn', !control.paused);
+  const next = control.nextScheduledRun
+    ? new Date(control.nextScheduledRun).toLocaleString('de-DE') : '–';
+  document.getElementById('ctrl-state').innerHTML =
+    `Zeitplan: <b>${control.schedule||'–'}</b> (${control.tz||''}) · nächster Lauf: <b>${next}</b>` +
+    (control.paused ? ' · <span style="color:var(--warn)">PAUSIERT</span>' : '') +
+    (!control.enabled ? ' · SYNC_ENABLED=false' : '');
+}
+
+function render(d){
+  document.getElementById('upd').textContent = new Date().toLocaleTimeString('de-DE');
+  const pctUsed = d.databaseSizeBytes/ (d.storageStopGib*1073741824) *100;
+  const level = d.databaseSizeBytes >= d.storageStopGib*1073741824 ? 'stop'
+              : d.databaseSizeBytes >= d.storageWarnGib*1073741824 ? 'warn' : '';
+  document.getElementById('cards').innerHTML = `
+    <div class="card"><h2>Datensätze</h2><div class="big">${fmt(d.records)}</div>
+      <div class="small">zuletzt synchronisiert: ${d.lastSuccessfulSync || '–'}</div></div>
+    <div class="card"><h2>Datenbank</h2><div class="big">${gib(d.databaseSizeBytes)}</div>
+      <div class="bar ${level}"><div style="width:${Math.min(pctUsed,100)}%"></div></div>
+      <div class="small">Budget: Warn ${d.storageWarnGib} / Stopp ${d.storageStopGib} GiB · frei: ${gib(d.diskFreeBytes)}</div></div>
+    <div class="card"><h2>Verworfen (Nicht-Buch)</h2><div class="big">${fmt(d.totalDiscarded)}</div>
+      <div class="small">Filter beim Import · Releases getrackt: ${fmt(d.releasesTracked)}</div></div>
+    <div class="card"><h2>Status</h2><div class="big">${d.ready?'Bereit':'Initialisiere'}</div>
+      <div class="small">Schema v${d.schemaVersion}${d.records===0&&!d.activeSync?' · Bootstrap noch nicht ausgeführt':''}</div></div>`;
+
+  const a = d.activeSync;
+  const el = document.getElementById('active');
+  if(!a){ el.innerHTML = '<div class="idle">Kein Sync aktiv – nächster Lauf nach Zeitplan (siehe Steuerung).</div>'; }
+  else {
+    let bar='';
+    if(a.status==='downloading' && a.downloadTotalBytes>0){
+      const p=Math.min(100,a.downloadDoneBytes/a.downloadTotalBytes*100);
+      bar=`<div class="bar"><div style="width:${p}%"></div></div>
+           <div class="small">Download: ${gib(a.downloadDoneBytes)} / ${gib(a.downloadTotalBytes)} (${p.toFixed(1)}%)</div>`;
+    }
+    el.innerHTML = `<div>${pill(a.status)} <b>${a.collection}</b>
+        <span class="small">${trunc(a.releaseIdentifier,64)}</span></div>${bar}
+      <div class="counters">
+        <span>Gesehen <b>${fmt(a.recordsSeen)}</b></span>
+        <span>Neu <b>${fmt(a.recordsInserted)}</b></span>
+        <span>Aktualisiert <b>${fmt(a.recordsUpdated)}</b></span>
+        <span>Übersprungen <b>${fmt(a.recordsSkipped)}</b></span>
+        <span>Verworfen <b>${fmt(a.recordsDiscarded)}</b></span>
+        <span>Fehler <b>${fmt(a.recordsFailed)}</b></span>
+        <span>Start <b>${a.startedAt||'–'}</b></span></div>
+      ${a.errorMessage?`<div class="err">${a.errorMessage}</div>`:''}`;
+  }
+
+  document.querySelector('#colls tbody').innerHTML = d.collections.map(c=>`
+    <tr><td><b>${c.collection}</b></td><td>${pill(c.status||'not_discovered')}</td>
+    <td class="num">${fmt(c.recordsInserted)} / ${fmt(c.recordsUpdated)}</td>
+    <td class="num">${fmt(c.recordsDiscarded)}</td>
+    <td class="num">${fmt(c.recordsFailed)}</td>
+    <td class="small">${c.completedAt||'–'}</td></tr>`).join('');
+
+  document.querySelector('#recent tbody').innerHTML = d.recentReleases.map(r=>`
+    <tr><td>${r.collection}</td><td class="small">${trunc(r.releaseIdentifier?.replace('annas_archive_meta__aacid__',''),40)}</td>
+    <td>${pill(r.status)}</td><td class="num">${fmt(r.recordsSeen)}</td>
+    <td class="err">${r.errorMessage?trunc(r.errorMessage,90):''}</td></tr>`).join('');
+}
+
+async function tick(){
+  try{
+    const r = await fetch('/api/v1/sync/status');
+    if(r.ok){ render(await r.json()); }
+  }catch(e){ /* keep last state */ }
+  try{
+    const c = await fetch('/api/v1/sync/control');
+    if(c.ok){ control = {...control, ...(await c.json())}; renderControl(); }
+  }catch(e){ /* keep last state */ }
+}
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,167 @@
+name: aa-metadata
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Konfiguration: ALLES steht direkt hier – kein .env nötig.
+# Nach Änderungen: docker compose up -d
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    container_name: aa_metadata_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aa_metadata
+      POSTGRES_USER: aa_metadata
+      POSTGRES_PASSWORD: change-me-please        # ← anpassen!
+      TZ: Europe/Berlin
+    volumes:
+      # Beide Volumes müssen auf demselben Dateisystem liegen (NAS-Pfad hier eintragen)
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aa_metadata -d aa_metadata"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 4gb
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Kein Ports-Block: PostgreSQL bleibt ausschließlich im internen Netz.
+    networks:
+      - internal
+
+  api:
+    image: ghcr.io/frederikemmer/aa-metadata-worker:latest
+    container_name: aa_metadata_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: aa_metadata
+      POSTGRES_USER: aa_metadata
+      POSTGRES_PASSWORD: change-me-please        # ← muss zu postgres passen!
+      TZ: Europe/Berlin
+      LOG_LEVEL: INFO
+      METADATA_API_KEY:                          # optionaler Bearer-Schutz (leer = aus)
+      API_STATEMENT_TIMEOUT_MS: "20000"          # COUNT(*) auf 24 Mio+ Rows braucht >10 s
+
+      # Welche Collections importiert werden (Bücher):
+      AA_COLLECTIONS: zlib3_records,upload_records,ia2_records
+      AA_MIRROR_BASE_URL: https://annas-archive.gd
+
+      # Nicht-Buch-Subcollections aus upload_records werden verworfen:
+      AA_UPLOAD_BLOCKED_SUBCOLLECTIONS: academia_edu,us_gov_tech_reports,wikilib,aaaaarg,magzdb
+      # upload_records ohne echten Titel+Autor (aus Datei-Metadaten) verwerfen:
+      AA_UPLOAD_REQUIRE_TITLE_AUTHOR: "true"
+      # ia2 nur mit IA-mediatype "texts" (Bücher/Scans), Rest verwerfen:
+      AA_IA_REQUIRE_TEXTS: "true"
+
+      # Update-Verhalten: nur neue Torrent-Stücke laden (alter Payload wird als
+      # Basis wiederverwendet); alter Payload bleibt dafür auf der Platte.
+      SYNC_REUSE_PREV_PAYLOAD: "true"
+      SYNC_ENABLED: "true"
+      SYNC_SCHEDULE: "03:15"                     # HH:MM Europe/Berlin
+      SYNC_BATCH_SIZE: "20000"
+      SYNC_ERROR_ABORT_RATE: "0.02"              # Import abbrechen ab 2 % Fehlerrate
+
+      # Storage-Budget (GiB): Warnung / harter Stopp für Downloads+Imports
+      STORAGE_WARN_GIB: "300"
+      STORAGE_STOP_GIB: "400"
+    volumes:
+      - ./data/sync_work:/work/sync:ro
+    ports:
+      # Dashboard + API im LAN erreichbar (z. B. http://<server-ip>:8010/dashboard).
+      # Optional per METADATA_API_KEY absichern; Health/Dashboard bleiben offen.
+      - "8010:8010"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/api/v1/health/live', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1gb
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - internal
+      - docker_bridge
+
+  sync:
+    image: ghcr.io/frederikemmer/aa-metadata-worker:latest
+    container_name: aa_metadata_sync
+    restart: unless-stopped
+    command: ["python", "-m", "sync.cli", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: aa_metadata
+      POSTGRES_USER: aa_metadata
+      POSTGRES_PASSWORD: change-me-please        # ← muss zu postgres passen!
+      TZ: Europe/Berlin
+      LOG_LEVEL: INFO
+
+      AA_COLLECTIONS: zlib3_records,upload_records,ia2_records
+      AA_MIRROR_BASE_URL: https://annas-archive.gd
+      AA_UPLOAD_BLOCKED_SUBCOLLECTIONS: academia_edu,us_gov_tech_reports,wikilib,aaaaarg,magzdb
+      AA_UPLOAD_REQUIRE_TITLE_AUTHOR: "true"
+      AA_IA_REQUIRE_TEXTS: "true"
+      SYNC_REUSE_PREV_PAYLOAD: "true"
+      SYNC_ENABLED: "true"
+      SYNC_SCHEDULE: "03:15"
+      SYNC_BATCH_SIZE: "20000"
+      SYNC_ERROR_ABORT_RATE: "0.02"
+      STORAGE_WARN_GIB: "300"
+      STORAGE_STOP_GIB: "400"
+    volumes:
+      - ./data/sync_work:/work/sync
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 2gb
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - internal
+
+# Externes Netz der bestehenden Infrastruktur: FE.Library erreicht die API
+# darüber unter http://aa_metadata_api:8010 (Container-zu-Container).
+networks:
+  internal:
+    driver: bridge
+  docker_bridge:
+    external: true

@@ -1,0 +1,11 @@
+.git
+.env
+data/
+sync_work/
+tests/
+docs/
+*.md
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
