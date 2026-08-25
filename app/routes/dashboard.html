@@ -94,10 +94,52 @@
 <script>
 const fmt = n => (n ?? 0).toLocaleString('de-DE');
 const gib = b => ((b||0)/1073741824).toFixed(2)+' GiB';
+const scaleBytes = b => {
+  const u = ['B','KiB','MiB','GiB','TiB']; let i = 0;
+  while (b >= 1024 && i < u.length-1){ b /= 1024; i++; }
+  return (b >= 100 ? b.toFixed(0) : b >= 10 ? b.toFixed(1) : b.toFixed(2))+' '+u[i];
+};
+const fmtEta = s => {
+  if (!isFinite(s) || s <= 0) return '–';
+  const h = Math.floor(s/3600), m = Math.round((s%3600)/60);
+  if (h > 0) return `~${h} Std ${m} Min`;
+  if (m >= 1) return `~${m} Min`;
+  return '<1 Min';
+};
 const trunc = (s,n=46) => !s ? '' : (s.length>n ? s.slice(0,n)+'…' : s);
 const pill = s => `<span class="pill p-${s}">${s}</span>`;
 let prevActiveKey = null, prevCount = null;
 let control = {paused:false, enabled:true};
+let dlSamples = [], dlKey = null;
+
+// Sliding-window download rate (the DB progress counter only updates in
+// intervals, so a short client-side average gives a stable speed + ETA).
+function trackDownload(a){
+  const key = a.collection+'/'+a.releaseIdentifier;
+  const last = dlSamples[dlSamples.length-1];
+  if (key !== dlKey || (last && a.downloadDoneBytes < last.done)){
+    dlKey = key; dlSamples = [];
+  }
+  const now = Date.now();
+  dlSamples.push({t: now, done: a.downloadDoneBytes});
+  while (dlSamples.length > 1 && now - dlSamples[0].t > 300000) dlSamples.shift();
+  const first = dlSamples[0];
+  const spanS = (now - first.t)/1000;
+  let line;
+  if (spanS >= 15){
+    const rate = (a.downloadDoneBytes - first.done)/spanS;
+    if (rate > 0){
+      const eta = fmtEta((a.downloadTotalBytes - a.downloadDoneBytes)/rate);
+      const win = spanS >= 90 ? Math.round(spanS/60)+' Min' : Math.round(spanS)+'s';
+      line = `⇣ ${scaleBytes(rate)}/s · ETA ${eta} <span style="opacity:.65">(Ø letzte ${win})</span>`;
+    } else {
+      line = `<span style="color:var(--warn)">⇣ kein Fortschritt seit ${Math.round(spanS)}s</span>`;
+    }
+  } else {
+    line = '⇣ Geschwindigkeit wird ermittelt…';
+  }
+  return `<div class="small">${line}</div>`;
+}
 
 function toast(msg, ok=true){
   const t = document.getElementById('toast');
@@ -178,7 +220,8 @@ function render(d){
     if(a.status==='downloading' && a.downloadTotalBytes>0){
       const p=Math.min(100,a.downloadDoneBytes/a.downloadTotalBytes*100);
       bar=`<div class="bar"><div style="width:${p}%"></div></div>
-           <div class="small">Download: ${gib(a.downloadDoneBytes)} / ${gib(a.downloadTotalBytes)} (${p.toFixed(1)}%)</div>`;
+           <div class="small">Download: ${gib(a.downloadDoneBytes)} / ${gib(a.downloadTotalBytes)} (${p.toFixed(1)}%)</div>
+           ${trackDownload(a)}`;
     }
     el.innerHTML = `<div>${pill(a.status)} <b>${a.collection}</b>
         <span class="small">${trunc(a.releaseIdentifier,64)}</span></div>${bar}
