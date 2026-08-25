@@ -52,7 +52,7 @@
 </style>
 </head>
 <body>
-<h1>AA Metadata Worker <span class="refresh" id="upd"></span></h1>
+<h1>AA Metadata Worker <span id="ver" class="small" style="font-weight:400"></span> <span class="refresh" id="upd"></span></h1>
 <div class="sub">Metadaten-Index aus Anna's Archive · Aktualisierung alle 2 s</div>
 <div class="toast" id="toast"></div>
 
@@ -110,6 +110,29 @@ const trunc = (s,n=46) => !s ? '' : (s.length>n ? s.slice(0,n)+'…' : s);
 const pill = s => `<span class="pill p-${s}">${s}</span>`;
 let prevActiveKey = null, prevCount = null;
 let control = {paused:false, enabled:true};
+let appVersion = null, latestSha = null;
+
+// Version display: baked-in build SHA compared against GitHub main (public API,
+// polled rarely to respect the rate limit).
+function renderVersion(){
+  const el = document.getElementById('ver');
+  if (!appVersion){ el.textContent = ''; return; }
+  const short = appVersion === 'dev' ? 'dev' : appVersion.slice(0,7);
+  let badge = '';
+  if (appVersion !== 'dev' && latestSha){
+    badge = appVersion === latestSha
+      ? ' <span style="color:var(--ok)" title="Build = aktueller Stand auf GitHub">✓ aktuell</span>'
+      : ` <span style="color:var(--warn)" title="Auf GitHub ist ein neuerer Stand vorhanden">⟳ Update verfügbar</span>`;
+  }
+  el.innerHTML = `v${short}${badge}`;
+}
+
+async function checkLatestRelease(){
+  try{
+    const r = await fetch('https://api.github.com/repos/frederikemmer/aa-metadata-worker/commits/main');
+    if (r.ok){ latestSha = (await r.json()).sha; renderVersion(); }
+  }catch(e){ /* offline / rate-limited: keep version without badge */ }
+}
 let dlSamples = [], dlKey = null;
 
 // Sliding-window download rate (the DB progress counter only updates in
@@ -198,6 +221,7 @@ function renderControl(){
 
 function render(d){
   document.getElementById('upd').textContent = new Date().toLocaleTimeString('de-DE');
+  if (!appVersion || appVersion !== d.appVersion){ appVersion = d.appVersion; renderVersion(); }
   const pctUsed = d.databaseSizeBytes/ (d.storageStopGib*1073741824) *100;
   const level = d.databaseSizeBytes >= d.storageStopGib*1073741824 ? 'stop'
               : d.databaseSizeBytes >= d.storageWarnGib*1073741824 ? 'warn' : '';
@@ -260,7 +284,9 @@ async function tick(){
   }catch(e){ /* keep last state */ }
 }
 tick();
+checkLatestRelease();
 setInterval(tick, 2000);
+setInterval(checkLatestRelease, 300000);
 </script>
 </body>
 </html>

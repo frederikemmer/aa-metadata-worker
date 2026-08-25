@@ -12,6 +12,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 FROM python:3.11-slim-bookworm AS runtime
 
+# Git-Commit des Builds (via CI build-arg); zeigt dem User die exakte Version.
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
+
 LABEL name="aa-metadata-worker" \
       org.opencontainers.image.source="https://github.com/frederikemmer/aa-metadata-worker" \
       org.opencontainers.image.description="Anna's Archive metadata index service for FE.Library (metadata-only)"

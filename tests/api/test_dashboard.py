@@ -24,7 +24,7 @@ class TestSyncStatusJson:
         assert response.status_code == 200
         body = response.json()
         for key in (
-            "ready", "records", "databaseSizeBytes", "diskFreeBytes",
+            "ready", "appVersion", "records", "databaseSizeBytes", "diskFreeBytes",
             "storageWarnGib", "storageStopGib", "activeSync",
             "collections", "recentReleases", "totalDiscarded",
         ):

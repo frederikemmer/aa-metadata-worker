@@ -8,6 +8,7 @@ works across container boundaries.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 
@@ -82,6 +83,7 @@ def sync_status(
 
     return {
         "ready": ready,
+        "appVersion": os.environ.get("APP_VERSION", "dev"),
         "schemaVersion": int(version_row[0]),
         "records": records_row,
         "lastSuccessfulSync": last_sync_row[0],
