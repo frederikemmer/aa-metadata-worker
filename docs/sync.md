@@ -45,6 +45,12 @@ gar nicht in der Datenbank:
 | `upload_records` | Subcollection-Blocklist (academia_edu, us_gov_tech_reports, wikilib, aaaaarg, magzdb) | `AA_UPLOAD_BLOCKED_SUBCOLLECTIONS` |
 | `upload_records` | Datensätze ohne echten Titel+Autor (aus exiftool/pikepdf – Dateinamen-Fallback zählt nicht) werden verworfen | `AA_UPLOAD_REQUIRE_TITLE_AUTHOR` |
 | `ia2_records` | Nur IA-Items mit mediatype „texts“; Audio/Video/… wird verworfen | `AA_IA_REQUIRE_TEXTS` |
+| `gbooks_records` | Nur Google-Books-Einträge mit printType „BOOK“; Magazine werden verworfen | `AA_GBOOKS_REQUIRE_BOOKS` |
+| `libby_records` | Nur Libby-Medientypen aus der Allowlist (ebook, audiobook); Rest wird verworfen | `AA_LIBBY_ALLOWED_TYPES` |
+
+Die Anreicherungs-Collections (`goodreads_records`, `gbooks_records`,
+`libby_records`) enthalten keine Datei-MD5s; als Primärschlüssel dient ein
+deterministischer synthetischer Hash aus Collection + Quell-ID.
 
 Verworfene Datensätze werden pro Release gezählt (`records_discarded`) und sind
 im Dashboard sichtbar.

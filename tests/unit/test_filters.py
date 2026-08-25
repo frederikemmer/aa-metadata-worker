@@ -10,7 +10,7 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def load_fixture(name: str) -> list[dict]:
-    lines = (FIXTURES / f"{name}.jsonl").read_text().splitlines()
+    lines = (FIXTURES / f"{name}.jsonl").read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines if line.strip()]
 
 

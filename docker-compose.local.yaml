@@ -66,11 +66,13 @@ services:
       METADATA_API_KEY:                          # optionaler Bearer-Schutz (leer = aus)
       API_STATEMENT_TIMEOUT_MS: "20000"
 
-      AA_COLLECTIONS: zlib3_records,upload_records,ia2_records
+      AA_COLLECTIONS: zlib3_records,ia2_records,goodreads_records,gbooks_records,libby_records,upload_records
       AA_MIRROR_BASE_URL: https://annas-archive.gd
       AA_UPLOAD_BLOCKED_SUBCOLLECTIONS: academia_edu,us_gov_tech_reports,wikilib,aaaaarg,magzdb
       AA_UPLOAD_REQUIRE_TITLE_AUTHOR: "true"
       AA_IA_REQUIRE_TEXTS: "true"
+      AA_GBOOKS_REQUIRE_BOOKS: "true"
+      AA_LIBBY_ALLOWED_TYPES: ebook,audiobook
 
       SYNC_REUSE_PREV_PAYLOAD: "true"
       SYNC_ENABLED: "true"

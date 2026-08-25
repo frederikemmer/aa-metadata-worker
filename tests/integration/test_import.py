@@ -148,6 +148,26 @@ class TestImportPipeline:
         with pytest.raises(RuntimeError, match="error rate"):
             import_release(db_conn, "zlib3_records", payload, release_id, strict)
 
+    def test_enrichment_collections_import(self, db_conn, tmp_path):
+        """goodreads/gbooks/libby land with synthetic md5s and correct counters."""
+        from sync.sources.base import synthetic_md5
+
+        for collection in ("goodreads_records", "gbooks_records", "libby_records"):
+            stats = import_fixture(db_conn, collection, tmp_path)
+            assert stats.failed == 0
+            assert stats.inserted > 0
+            # Each fixture contains one non-importable line: goodreads lacks an
+            # id there (-> skipped), gbooks/libby hit their type filters (-> discarded).
+            assert stats.skipped + stats.discarded >= 1
+            rows = db_conn.execute(
+                "SELECT md5, source_collection, source_record_id FROM metadata_records "
+                "WHERE source_collection = %s",
+                (collection,),
+            ).fetchall()
+            assert rows
+            for md5, coll, rid in rows:
+                assert md5 == synthetic_md5(coll, rid)
+
 
 class TestFtsConsistency:
     def test_search_vector_populated(self, db_conn, tmp_path):
@@ -158,5 +178,12 @@ class TestFtsConsistency:
         assert missing == 0
 
     def test_adapter_registry_matches_collections(self, db_conn):
-        for collection in ("zlib3_records", "ia2_records", "upload_records"):
+        for collection in (
+            "zlib3_records",
+            "ia2_records",
+            "upload_records",
+            "goodreads_records",
+            "gbooks_records",
+            "libby_records",
+        ):
             assert get_adapter(collection).collection == collection

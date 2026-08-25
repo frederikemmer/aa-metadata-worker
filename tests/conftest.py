@@ -104,4 +104,5 @@ def make_zst(lines: list[dict] | list[str], target: Path) -> Path:
 
 
 def fixture_lines(name: str) -> list[str]:
-    return [line for line in (FIXTURES / f"{name}.jsonl").read_text().splitlines() if line.strip()]
+    lines = (FIXTURES / f"{name}.jsonl").read_text(encoding="utf-8").splitlines()
+    return [line for line in lines if line.strip()]

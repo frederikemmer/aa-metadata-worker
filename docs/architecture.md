@@ -65,6 +65,12 @@ Ein Adapter pro Collection, keine `if collection == …`-Kaskaden:
 | `zlib3.Zlib3Adapter` | `zlib3_records` | `md5_reported`, Sprache als englischer Name, ASINs werden gefiltert, `annabookinfo.response.ipfs_cid` wird extrahiert, `removed/removalReason` → Tombstone |
 | `ia2.Ia2Adapter` | `ia2_records` | Ein Record pro Datei aus `aa_shorter_files` (md5 je Datei), Item-Metadaten vererbt, OCLC/OpenLibrary-IDs |
 | `uploads.UploadsAdapter` | `upload_records` | Best-effort aus `exiftool_output`/`pikepdf_docinfo`/Dateipfad; `deleted_as_duplicate` → Tombstone |
+| `goodreads.GoodreadsAdapter` | `goodreads_records` | Goodreads-XML (`metadata.record`), synthetischer MD5 aus `collection\|id`, ISBN/Sprache/Jahr |
+| `gbooks.GbooksAdapter` | `gbooks_records` | Google-Books-JSON, `industryIdentifiers` → ISBNs, `printType != BOOK` verwerfbar (`AA_GBOOKS_REQUIRE_BOOKS`) |
+| `libby.LibbyAdapter` | `libby_records` | OverDrive-JSON, Creator-Rolle „Author", Publisher→Imprint-Fallback, Medientyp-Filter (`AA_LIBBY_ALLOWED_TYPES`) |
+
+Die drei Anreicherungs-Adapter nutzen `sync.sources.base.synthetic_md5`
+(deterministisch, kein Datei-MD5 in der Quelle vorhanden).
 
 Neue Collections = neuer Adapter + Registrierung in `sync/sources/__init__.py`.
 

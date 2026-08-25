@@ -8,19 +8,26 @@ import pytest
 
 from common.config import load_settings
 from sync.sources import get_adapter, known_collections
-from sync.sources.base import aacid_timestamp
+from sync.sources.base import aacid_timestamp, synthetic_md5
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def load_fixture(name: str) -> list[dict]:
-    lines = (FIXTURES / f"{name}.jsonl").read_text().splitlines()
+    lines = (FIXTURES / f"{name}.jsonl").read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines if line.strip()]
 
 
 class TestRegistry:
     def test_known_collections(self):
-        assert known_collections() == ["ia2_records", "upload_records", "zlib3_records"]
+        assert known_collections() == [
+            "gbooks_records",
+            "goodreads_records",
+            "ia2_records",
+            "libby_records",
+            "upload_records",
+            "zlib3_records",
+        ]
 
     def test_unknown_raises(self):
         with pytest.raises(KeyError):
@@ -31,6 +38,16 @@ class TestAacidTimestamp:
     def test_parse(self):
         ts = aacid_timestamp("aacid__zlib3_records__20230808T014342Z__123__abc")
         assert ts is not None and ts.year == 2023 and ts.tzinfo is not None
+
+
+class TestSyntheticMd5:
+    def test_deterministic_per_collection_and_id(self):
+        a = synthetic_md5("goodreads_records", "1115623")
+        assert a is not None and len(a) == 16
+        assert a == synthetic_md5("goodreads_records", "1115623")
+        assert a != synthetic_md5("gbooks_records", "1115623")
+        assert synthetic_md5("goodreads_records", None) is None
+        assert synthetic_md5("goodreads_records", "  ") is None
 
 
 class TestZlib3Adapter:
@@ -101,11 +118,7 @@ class TestIa2Adapter:
             date="1999",
             language=["eng"],
         )
-        records = [
-            r
-            for r in self.adapter.parse(base)
-            if not r.discarded and not r.deleted
-        ]
+        records = [r for r in self.adapter.parse(base) if not r.discarded and not r.deleted]
         assert records, "usable files expected in fixture item"
         for record in records:
             assert record.title == "A List Title"
@@ -136,9 +149,7 @@ class TestUploadsAdapter:
     adapter = get_adapter("upload_records")
 
     def _relaxed(self):
-        return type(self.adapter)(
-            dataclasses.replace(load_settings(), upload_require_title_author=False)
-        )
+        return type(self.adapter)(dataclasses.replace(load_settings(), upload_require_title_author=False))
 
     def test_parses_fixture(self):
         raws = load_fixture("upload_records")
@@ -161,11 +172,7 @@ class TestUploadsAdapter:
     def test_title_fallback_from_filepath(self):
         raws = load_fixture("upload_records")
         relaxed = self._relaxed()
-        no_exif = next(
-            raw
-            for raw in raws
-            if not (raw["metadata"].get("exiftool_output") or {}).get("Title")
-        )
+        no_exif = next(raw for raw in raws if not (raw["metadata"].get("exiftool_output") or {}).get("Title"))
         record = relaxed.parse(no_exif)[0]
         assert record.title, "filepath fallback must produce non-empty title"
 
@@ -182,3 +189,108 @@ class TestUploadsAdapter:
         assert result.discarded
         assert result.discard_reason == "missing_title_or_author"
 
+
+class TestGoodreadsAdapter:
+    adapter = get_adapter("goodreads_records")
+
+    def test_parses_all_lines_with_id(self):
+        raws = load_fixture("goodreads_records")
+        parsed = [r for raw in raws for r in self.adapter.parse(raw)]
+        assert len(parsed) == 2  # third fixture line has no id -> skipped
+        assert all(len(r.md5) == 16 for r in parsed)
+
+    def test_fields_from_real_sample(self):
+        raw = load_fixture("goodreads_records")[0]
+        rec = self.adapter.parse(raw)[0]
+        assert rec.title.startswith("A quoi tu joues")
+        assert rec.authors == ["Sōichirō Yamamoto"]
+        assert rec.publisher == "Nobi Nobi"
+        assert rec.publication_year == 2024
+        assert rec.languages == ["fra"]  # language_code "fre" (ISO 639-2) -> fra
+        assert "9782384961788" in rec.isbn13
+        assert rec.source_record_id == "203981051"
+        assert rec.aacid == raw["aacid"]
+        assert rec.source_timestamp is not None
+
+    def test_german_sample_with_work_year_fallback(self):
+        raw = load_fixture("goodreads_records")[1]
+        rec = self.adapter.parse(raw)[0]
+        assert rec.title == "Der Steppenwolf"
+        assert rec.publication_year == 1974  # publication_year wins over work year (1927)
+        assert rec.languages == ["deu"]
+        assert "9783518366752" in rec.isbn13
+
+    def test_synthetic_md5_stable(self):
+        raw = load_fixture("goodreads_records")[0]
+        first = self.adapter.parse(raw)[0].md5
+        assert first == synthetic_md5("goodreads_records", "203981051")
+
+
+class TestGbooksAdapter:
+    adapter = get_adapter("gbooks_records")
+
+    def test_fields_from_real_sample(self):
+        raw = load_fixture("gbooks_records")[0]
+        rec = self.adapter.parse(raw)[0]
+        assert rec.title == "The Elements and Practice of Rigging, Seamanship, and Naval Tactics"
+        assert rec.authors == ["David Steel"]
+        assert rec.publication_year == 2011
+        assert rec.languages == ["eng"]
+        assert "9781108026512" in rec.isbn13
+        # The ISBN-10 variant is absorbed into its ISBN-13 form by normalize_isbn_list.
+        assert rec.isbn10 == []
+        assert rec.source_record_id == "dNC07lyONssC"
+
+    def test_magazine_discarded(self):
+        raw = next(r for r in load_fixture("gbooks_records") if r["metadata"].get("printType") == "MAGAZINE")
+        parsed = self.adapter.parse(raw)
+        assert len(parsed) == 1 and parsed[0].discarded
+        assert parsed[0].discard_reason == "gbooks_printtype:MAGAZINE"
+
+    def test_magazine_kept_when_gate_disabled(self):
+        relaxed = type(self.adapter)(dataclasses.replace(load_settings(), gbooks_require_books=False))
+        raw = next(r for r in load_fixture("gbooks_records") if r["metadata"].get("printType") == "MAGAZINE")
+        parsed = relaxed.parse(raw)
+        assert len(parsed) == 1 and not parsed[0].discarded
+
+    def test_missing_identifiers_ok(self):
+        raw = next(r for r in load_fixture("gbooks_records") if r["metadata"]["id"] == "NOIDENT0001")
+        rec = self.adapter.parse(raw)[0]
+        assert rec.isbn13 == [] and rec.isbn10 == []
+        assert rec.publication_year == 1999
+        assert rec.languages == ["deu"]
+
+
+class TestLibbyAdapter:
+    adapter = get_adapter("libby_records")
+
+    def test_fields_from_real_sample(self):
+        raw = load_fixture("libby_records")[0]
+        rec = self.adapter.parse(raw)[0]
+        assert rec.title == "Katerina Diamond Untitled Standalone 3"
+        assert rec.authors == ["Katerina Diamond"]
+        assert rec.publisher == "HarperCollins Publishers"
+        assert rec.publication_year == 2024
+        assert rec.languages == ["eng"]
+        assert rec.edition == "Unabridged"
+
+    def test_ebook_variant_uses_imprint_fallback(self):
+        raw = next(r for r in load_fixture("libby_records") if r["metadata"].get("id") == "20000001")
+        rec = self.adapter.parse(raw)[0]
+        assert rec.publisher == "Mustermann Verlag"
+        assert rec.languages == ["deu"]
+        assert rec.edition == "First edition"
+        assert rec.publication_year == 2021
+
+    def test_disallowed_type_discarded(self):
+        raw = next(r for r in load_fixture("libby_records") if r["metadata"].get("id") == "30000001")
+        parsed = self.adapter.parse(raw)
+        assert len(parsed) == 1 and parsed[0].discarded
+        assert parsed[0].discard_reason == "libby_type:periodical"
+
+    def test_allowed_types_configurable(self):
+        strict = type(self.adapter)(dataclasses.replace(load_settings(), libby_allowed_types=["ebook"]))
+        raw = load_fixture("libby_records")[0]  # audiobook sample
+        parsed = strict.parse(raw)
+        assert parsed[0].discarded
+        assert parsed[0].discard_reason == "libby_type:audiobook"

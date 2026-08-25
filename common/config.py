@@ -44,9 +44,17 @@ class Settings:
     api_key: str = ""
     api_statement_timeout_ms: int = 5000
 
-    # Sync / collections
+    # Sync / collections. Order = processing order; the big upload_records
+    # download deliberately runs last so small enrichment collections first.
     aa_collections: list[str] = field(
-        default_factory=lambda: ["zlib3_records", "upload_records", "ia2_records"]
+        default_factory=lambda: [
+            "zlib3_records",
+            "ia2_records",
+            "goodreads_records",
+            "gbooks_records",
+            "libby_records",
+            "upload_records",
+        ]
     )
     aa_mirror_base_url: str = "https://annas-archive.gd"
     sync_enabled: bool = True
@@ -66,6 +74,10 @@ class Settings:
     )
     upload_require_title_author: bool = True  # drop uploads without real title+author
     ia_require_texts: bool = True  # keep only IA items with mediatype "texts"
+    gbooks_require_books: bool = True  # drop Google Books magazines (printType != BOOK)
+    libby_allowed_types: list[str] = field(
+        default_factory=lambda: ["ebook", "audiobook"]
+    )  # Libby media types kept in the index
 
     # Reuse the previous payload as torrent seed base so incremental updates only
     # download changed pieces (AAC cumulative releases share identical prefixes).
@@ -98,7 +110,15 @@ def load_settings() -> Settings:
         api_port=_env_int("API_PORT", 8010),
         api_key=os.environ.get("METADATA_API_KEY", ""),
         api_statement_timeout_ms=_env_int("API_STATEMENT_TIMEOUT_MS", 5000),
-        aa_collections=collections or ["zlib3_records", "upload_records", "ia2_records"],
+        aa_collections=collections
+        or [
+            "zlib3_records",
+            "ia2_records",
+            "goodreads_records",
+            "gbooks_records",
+            "libby_records",
+            "upload_records",
+        ],
         aa_mirror_base_url=os.environ.get("AA_MIRROR_BASE_URL", "https://annas-archive.gd"),
         sync_enabled=_env_bool("SYNC_ENABLED", True),
         sync_schedule=os.environ.get("SYNC_SCHEDULE", "03:15"),
@@ -110,6 +130,8 @@ def load_settings() -> Settings:
         ),
         upload_require_title_author=_env_bool("AA_UPLOAD_REQUIRE_TITLE_AUTHOR", True),
         ia_require_texts=_env_bool("AA_IA_REQUIRE_TEXTS", True),
+        gbooks_require_books=_env_bool("AA_GBOOKS_REQUIRE_BOOKS", True),
+        libby_allowed_types=_env_list("AA_LIBBY_ALLOWED_TYPES", ["ebook", "audiobook"]),
         sync_reuse_prev_payload=_env_bool("SYNC_REUSE_PREV_PAYLOAD", True),
         storage_warn_gib=_env_int("STORAGE_WARN_GIB", 300),
         storage_stop_gib=_env_int("STORAGE_STOP_GIB", 400),

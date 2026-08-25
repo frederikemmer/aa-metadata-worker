@@ -20,7 +20,10 @@ selbst über `work_key`.
 | `extension` / `filesize` | TEXT/BIGINT | Format (lowercase, validiert) und Dateigröße in Bytes |
 | `isbn10`, `isbn13`, `doi`, `oclc`, `openlibrary_ids` | TEXT[] | Normalisierte, checksummengeprüfte Identifier (Arrays, da Quellen Mehrfachnennungen liefern) |
 | `work_key` | TEXT NULL | Deterministische logische Werk-ID (siehe unten) |
-| `source_collection` | TEXT | `zlib3_records` \| `ia2_records` \| `upload_records` |
+| `series_name` | TEXT | Reihenname (z.B. `"Wicked Games"`) |
+| `series_position` | SMALLINT | Bandnummer in der Reihe |
+| `edition` | TEXT | Auflage (z.B. `"2nd Edition"`, `"Reissue"`) |
+| `source_collection` | TEXT | `zlib3_records` \| `ia2_records` \| `upload_records` \| `goodreads_records` \| `gbooks_records` \| `libby_records` |
 | `source_record_id` | TEXT | z. B. `zlibrary_id`, `ia_id`, `primary_id` |
 | `aacid` | TEXT | AACID des letzten importierenden Records (Provenance) |
 | `source_timestamp` | TIMESTAMPTZ | Scrape-Timestamp aus dem AACID |

@@ -54,8 +54,12 @@ services:
       METADATA_API_KEY:                          # optionaler Bearer-Schutz (leer = aus)
       API_STATEMENT_TIMEOUT_MS: "20000"          # COUNT(*) auf 24 Mio+ Rows braucht >10 s
 
-      # Welche Collections importiert werden (Bücher):
-      AA_COLLECTIONS: zlib3_records,upload_records,ia2_records
+      # Welche Collections importiert werden. Reihenfolge = Verarbeitungsreihenfolge:
+      # Bücher zuerst, die große upload_records-Download (136 GiB) bewusst zuletzt,
+      # damit die kleinen Anreicherungs-Quellen nicht dahinter warten müssen.
+      # goodreads/gbooks/libby sind reine Anreicherungs-Metadaten (ohne Download-
+      # Referenzen); sie verbessern Suche/Matching über ISBNs.
+      AA_COLLECTIONS: zlib3_records,ia2_records,goodreads_records,gbooks_records,libby_records,upload_records
       AA_MIRROR_BASE_URL: https://annas-archive.gd
 
       # Nicht-Buch-Subcollections aus upload_records werden verworfen:
@@ -64,6 +68,10 @@ services:
       AA_UPLOAD_REQUIRE_TITLE_AUTHOR: "true"
       # ia2 nur mit IA-mediatype "texts" (Bücher/Scans), Rest verwerfen:
       AA_IA_REQUIRE_TEXTS: "true"
+      # gbooks: Magazine (printType != BOOK) verwerfen:
+      AA_GBOOKS_REQUIRE_BOOKS: "true"
+      # libby: behaltene Medientypen (Rest verwerfen):
+      AA_LIBBY_ALLOWED_TYPES: ebook,audiobook
 
       # Sync-Verhalten:
       SYNC_REUSE_PREV_PAYLOAD: "true"

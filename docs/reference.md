@@ -158,7 +158,7 @@ identifiziert durch MD5 (16 Bytes, `BYTEA`). MD5 ≠ logisches Buch.
 | `series_name` | `TEXT` | Reihenname (z.B. `"Wicked Games"`) |
 | `series_position` | `SMALLINT` | Bandnummer in der Reihe |
 | `edition` | `TEXT` | Auflage (z.B. `"2nd Edition"`) |
-| `source_collection` | `TEXT` | `zlib3_records` / `ia2_records` / `upload_records` |
+| `source_collection` | `TEXT` | `zlib3_records` / `ia2_records` / `upload_records` / `goodreads_records` / `gbooks_records` / `libby_records` |
 | `source_record_id` | `TEXT` | Quellen-ID (z.B. `zlibrary_id`) |
 | `aacid` | `TEXT` | AACID des letzten Import-Records |
 | `source_timestamp` | `TIMESTAMPTZ` | Scrape-Timestamp aus dem AACID |
@@ -274,6 +274,14 @@ Ein Adapter pro Collection, registriert in `sync/sources/__init__.py`:
 | `Zlib3Adapter` | `zlib3_records` | `md5_reported`, Sprache als englischer Name, ASINs gefiltert, `ipfs_cid`, Tombstone via `removed/removalReason` |
 | `Ia2Adapter` | `ia2_records` | Ein Record pro Datei aus `aa_shorter_files`, Item-Metadaten vererbt, OCLC/OpenLibrary-IDs, `mediatype != "texts"` → Discard |
 | `UploadsAdapter` | `upload_records` | Best-effort aus `exiftool_output`/`pikepdf_docinfo`, Subcollection-Blocklist, `deleted_as_duplicate` → Tombstone |
+| `GoodreadsAdapter` | `goodreads_records` | Goodreads-XML in `metadata.record`; synthetischer MD5 (`synthetic_md5(collection, id)`), ISBN/Sprache/Jahr aus XML |
+| `GbooksAdapter` | `gbooks_records` | Google-Books-JSON; `industryIdentifiers` → ISBNs; `printType != "BOOK"` → Discard (`AA_GBOOKS_REQUIRE_BOOKS`) |
+| `LibbyAdapter` | `libby_records` | OverDrive-JSON; Creator-Rolle „Author"; Publisher→Imprint-Fallback; Medientyp nicht in `AA_LIBBY_ALLOWED_TYPES` → Discard |
+
+Die drei Anreicherungs-Collections enthalten keine Datei-MD5s. Der
+deterministische Schlüssel `synthetic_md5(collection, record_id)` (SHA-256,
+16 Bytes) sorgt dafür, dass Re-Imports auf dieselbe Zeile mergen und echte
+Datei-MD5s praktisch nie kollidieren.
 
 Adapter-Vertrag (`SourceAdapter` ABC):
 ```python
@@ -467,7 +475,7 @@ Alle Versionen eines Werks, sortiert nach Quality Score (beste Version zuerst).
   "ready": true,
   "records": 24889217,
   "lastSuccessfulSync": "2026-08-21T04:17:31+00:00",
-  "collections": ["zlib3_records", "upload_records", "ia2_records"],
+  "collections": ["zlib3_records", "ia2_records", "goodreads_records", "gbooks_records", "libby_records", "upload_records"],
   "databaseSizeBytes": 8589934592,
   "diskFreeBytes": 107374182400,
   "schemaVersion": 4,
@@ -597,7 +605,7 @@ bewusst kein `.env`). `Settings` ist ein frozen Dataclass.
 | `API_PORT` | `8010` | API-Port |
 | `METADATA_API_KEY` | `""` | Optionaler Bearer-Key (leer = aus) |
 | `API_STATEMENT_TIMEOUT_MS` | `5000` | Statement-Timeout (NAS: 20000) |
-| `AA_COLLECTIONS` | `zlib3_records,upload_records,ia2_records` | Zu importierende Collections |
+| `AA_COLLECTIONS` | `zlib3_records,ia2_records,goodreads_records,gbooks_records,libby_records,upload_records` | Zu importierende Collections |
 | `AA_MIRROR_BASE_URL` | `https://annas-archive.gd` | AAC-Manifest-URL |
 | `SYNC_ENABLED` | `true` | Worker aktivieren |
 | `SYNC_SCHEDULE` | `03:15` | HH:MM Europe/Berlin |

@@ -73,7 +73,7 @@ docker compose up -d
 |---|---|---|
 | `POSTGRES_*` | – | DB-Zugang (nur intern; Passwort in allen 3 Services gleich) |
 | `METADATA_API_KEY` | leer | Optionaler Bearer-Schutz für Daten-Endpoints (Dashboard bleibt offen) |
-| `AA_COLLECTIONS` | `zlib3_records,upload_records,ia2_records` | Zu importierende Collections |
+| `AA_COLLECTIONS` | `zlib3_records,ia2_records,goodreads_records,gbooks_records,libby_records,upload_records` | Zu importierende Collections |
 | `AA_UPLOAD_BLOCKED_SUBCOLLECTIONS` | `academia_edu,us_gov_tech_reports,wikilib,aaaaarg,magzdb` | upload_records-Subcollections, die beim Import verworfen werden |
 | `AA_UPLOAD_REQUIRE_TITLE_AUTHOR` | `true` | upload-Datensätze ohne echten Titel+Autor verwerfen |
 | `AA_IA_REQUIRE_TEXTS` | `true` | Nur IA-Items mit mediatype „texts“ (Bücher/Scans) |
@@ -131,7 +131,15 @@ Reihenfolge & Größen (komprimierte Downloads, Stand Aug 2026):
 |---|---|---|
 | `ia2_records` | ~3,5 GB | Internet Archive Items |
 | `zlib3_records` | ~24 GB | Z-Library Bücher |
+| `goodreads_records` | ~8 GB | Goodreads Metadaten (Anreicherung, keine Downloads) |
+| `gbooks_records` | ~10 GB | Google Books Metadaten (Anreicherung, keine Downloads) |
+| `libby_records` | ~6 GB | Libby/OverDrive Metadaten (Anreicherung, keine Downloads) |
 | `upload_records` | ~146 GB | AA-Direktuploads (best-effort Metadaten) |
+
+Die drei Anreicherungs-Quellen haben keine Datei-MD5s; sie erhalten einen
+deterministischen synthetischen Schlüssel (`sha256(collection|id)`) und
+verbessern Suche/Matching über ISBNs. Download-Referenzen liefert weiterhin
+nur `/records/{md5}/sources` aus den Buch-Quellen.
 
 ## 8. Automatischer Sync
 
