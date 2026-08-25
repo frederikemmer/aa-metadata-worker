@@ -88,6 +88,9 @@ services:
     ports:
       # Dashboard + API im LAN erreichbar (z. B. http://<server-ip>:8010/dashboard).
       - "8010:8010"
+      # libtorrent Peer-to-Peer (DHT/PEX) — noinspection DockerComposeResolvePortInspection
+      - "6881:6881"
+      - "6881:6881/udp"
     read_only: true
     tmpfs:
       - /tmp:size=512m

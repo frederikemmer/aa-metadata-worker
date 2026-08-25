@@ -51,6 +51,21 @@ class TorrentClient:
         }
         self._session = lt.session(params)
 
+        # Enable DHT, LSD and PEX for better peer discovery — critical when
+        # the remaining pieces are rare (e.g.99.45% stall on zlib3).
+        settings = self._session.get_settings()
+        settings["enable_dht"] = True
+        settings["enable_lsd"] = True
+        settings["enable_natpmp"] = True
+        settings["enable_upnp"] = True
+        settings["anonymous_mode"] = False
+        self._session.apply_settings(settings)
+        self._session.add_dht_router("router.bittorrent.com", 6881)
+        self._session.add_dht_router("dht.transmissionbt.com", 6881)
+        self._session.add_dht_router("router.utorrent.com", 6881)
+        self._session.add_dht_router("dht.libtorrent.org", 25401)
+        logger.info("libtorrent session initialized with DHT/PEX enabled")
+
     def _fetch_torrent_bytes(self, torrent_url: str) -> bytes:
         response = httpx.get(torrent_url, timeout=60.0, follow_redirects=True)
         response.raise_for_status()

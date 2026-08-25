@@ -47,5 +47,6 @@ RUN chmod -R a+rX /app
 USER metadata
 
 EXPOSE 8010
+EXPOSE 6881
 
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8010"]
