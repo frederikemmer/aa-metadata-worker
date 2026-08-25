@@ -1,8 +1,22 @@
 # Übergabedokument – aa-metadata-worker
 
 > Stand: 25.08.2026. Erstellt nach interaktiver Session mit laufender Produktion auf dem NAS.
-> Zweck: Ein nachfolgender Agent soll ohne vorherigen Gesprächskontext weiterarbeiten können.
+> **Update 25.08.2026 16:00**: Alle Aufgaben A1–A4 + A6 abgeschlossen. A5 (Dockhand)=User-Aktion.
 > **AGENTS.md im Repo-Stamm gilt weiterhin unverändert** (Non-Negotiables!).
+
+---
+
+## Status der Aufgaben
+
+| Auftrag | Status | Details |
+|---|---|---|
+| A1 – GitHub-Repo + CI | ✅ erledigt | `frederikemmer/aa-metadata-worker` (public), CI pushed nach `ghcr.io` |
+| A2 – docker-compose.yaml Registry | ✅ erledigt | `image: ghcr.io/frederikemmer/aa-metadata-worker:latest`, `API_STATEMENT_TIMEOUT_MS=20000` |
+| A3 – NAS migriert | ✅ erledigt | Stack von `docker-compose.local.yaml` → `docker-compose.yaml` gewechselt |
+| A4 – Bootstrap gestartet | ✅ gestartet | `aa_bootstrap` Container läuft (zlib3 + upload) |
+| A5 – Dockhand Auto-Update | ⏳ User-Aktion | Siehe Abschnitt unten |
+| A6 – Status-500 Fix | ✅ erledigt | `approx_count()` mit reltuples-Fallback + 20s Timeout |
+| A7 – Docs aktualisiert | ✅ erledigt | README Abschnitt 15 aktualisiert |
 
 ---
 

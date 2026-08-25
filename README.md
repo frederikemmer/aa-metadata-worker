@@ -243,13 +243,30 @@ docker compose run --rm sync python -m sync.cli bootstrap
 
 ## 15. Update-Prozess
 
+### Via Registry-Image (Standard – NAS-Deployment)
+
+Der Stack läuft mit `ghcr.io/frederikemmer/aa-metadata-worker:latest`. Updates
+erfolgen automatisch über Dockhand (geplante Auto-Updates) oder manuell:
+
 ```bash
-git pull
-make check          # lint + tests + compose config + build
-docker compose up -d --build   # rolling restart, Migrationen laufen beim API-Start
+docker compose pull          # neuestes Image laden
+docker compose up -d         # rolling restart, Migrationen laufen beim API-Start
 ```
 
-Migrationen sind versioniert (`migrations/NNN_*.sql`) und laufen automatisch.
+Bei `docker compose up -d` erkennt Compose den neuen Digest und startet die
+Container neu. Migrationen laufen automatisch beim API-Start.
+
+### Via lokalem Build (Entwicklung / Rollback)
+
+```bash
+docker compose -f docker-compose.local.yaml up -d --build
+```
+
+### CI/CD
+
+Bei jedem Push auf `main` oder `v*`-Tag baut GitHub Actions das Image und
+pushed es nach `ghcr.io/frederikemmer/aa-metadata-worker`. Plattform:
+`linux/amd64` (NAS-kompatibel).
 
 ## 16. Tests
 
