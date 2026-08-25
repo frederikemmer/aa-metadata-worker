@@ -7,6 +7,7 @@ proxies or resolves book file downloads.
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,6 +18,28 @@ from common.config import load_settings
 from common.db import apply_migrations, close_pool, connect, get_pool
 
 logger = logging.getLogger(__name__)
+
+# Module-level stop event shared with the sync worker thread.
+_sync_stop = threading.Event()
+
+
+def _start_sync_worker() -> None:
+    """Launch the sync scheduler as a daemon thread (non-blocking)."""
+    if not load_settings().sync_enabled:
+        logger.info("SYNC_ENABLED=false; background sync worker not started.")
+        return
+
+    def _run() -> None:
+        from sync.worker import run_worker_forever
+
+        try:
+            run_worker_forever()
+        except Exception:  # noqa: BLE001 - worker must never crash the API
+            logger.exception("Sync worker thread failed.")
+
+    t = threading.Thread(target=_run, name="sync-worker", daemon=True)
+    t.start()
+    logger.info("Background sync worker thread started.")
 
 
 @asynccontextmanager
@@ -46,7 +69,16 @@ async def lifespan(app: FastAPI):
     if applied:
         logger.info("Applied migrations: %s", applied)
     get_pool(settings)  # warm up pool
+
+    # Start sync worker in background (if enabled).
+    _start_sync_worker()
+
     yield
+
+    # Shutdown: signal the sync worker to stop.
+    from sync.worker import request_stop
+
+    request_stop()
     close_pool()
 
 

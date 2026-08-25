@@ -132,15 +132,24 @@ class CommandPoller:
 
 
 def run_worker_forever() -> None:  # pragma: no cover - long-running loop
+    import threading
+
     from sync.importer import GracefulShutdown, install_signal_handlers
     from sync.run import run_sync
     from sync.state import SyncLockBusy
 
     settings = load_settings()
     reset_stop()
-    install_signal_handlers()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, request_stop)
+
+    # Signal handlers can only be installed in the main thread.
+    # When running embedded in the API process (daemon thread), skip them;
+    # the API lifespan handles shutdown via request_stop() instead.
+    if threading.current_thread() is threading.main_thread():
+        install_signal_handlers()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, request_stop)
+    else:
+        logger.info("Sync worker running in background thread; OS signal handlers skipped.")
 
     poller = CommandPoller()
     logger.info(
