@@ -128,6 +128,82 @@ def _download_one(
                 pass
 
 
+# -- Import (shared by sequential and parallel paths) -------------------------
+
+
+def _import_payload(
+    conn: psycopg.Connection,
+    collection: str,
+    payload_path: Path,
+    info: dict,
+    work_dir: Path,
+    settings: Settings,
+    summary: SyncRunSummary,
+) -> None:
+    """Import one downloaded payload and finalize its release row.
+
+    Called as soon as an individual download finishes so that finished
+    collections do not wait for slower/stalled torrents.
+    """
+    release_id = info["release_id"]
+    release = info["release"]
+    try:
+        # Guard before import: DB will grow while payload exists.
+        payload_bytes = payload_path.stat().st_size
+        db_size_now = state.database_size_bytes(conn)
+        decision = evaluate_storage(
+            str(work_dir),
+            db_size_now,
+            payload_bytes * 1.1,  # DB growth estimate while payload on disk
+            settings.storage_warn_gib,
+            settings.storage_stop_gib,
+        )
+        logger.info("%s", decision.message)
+
+        stats = import_release(conn, collection, payload_path, release_id, settings)
+        validate_import(conn, release_id, stats)
+        state.set_release_status(conn, release_id, "completed")
+        state.update_download_progress(
+            conn, release_id, payload_path.stat().st_size, payload_path.stat().st_size
+        )
+
+        if settings.sync_reuse_prev_payload:
+            os.replace(payload_path, _prev_payload_path(work_dir, collection))
+            logger.info("Payload kept as future seed base (%s).", collection)
+        else:
+            delete_payload(payload_path)
+
+        discarded_note = f" discarded={stats.discarded}" if stats.discarded else ""
+        logger.info(
+            "[%s] %s done: seen=%d inserted=%d updated=%d skipped=%d%s "
+            "failed=%d in %.0fs; db_size=%.2f GiB",
+            collection,
+            release.identifier[:70],
+            stats.seen,
+            stats.inserted,
+            stats.updated,
+            stats.skipped,
+            discarded_note,
+            stats.failed,
+            time.time() - summary.started_at,
+            state.database_size_bytes(conn) / GIB,
+        )
+        summary.processed.append((collection, release.identifier))
+    except GracefulShutdown:
+        state.set_release_status(
+            conn, release_id, "discovered", "Interrupted by shutdown (resumable)."
+        )
+        raise
+    except Exception as error:  # noqa: BLE001 - record failure, continue others
+        conn.rollback()
+        state.set_release_status(
+            conn, release_id, "failed", f"{type(error).__name__}: {error}"[:2000]
+        )
+        logger.exception("[%s] Import failed: %s", collection, error)
+        summary.failed.append((collection, f"{error}"))
+        delete_payload(work_dir / release.identifier)
+
+
 # -- Sequential download (original behaviour) --------------------------------
 
 
@@ -137,10 +213,9 @@ def _download_sequential(
     work_dir: Path,
     settings: Settings,
     summary: SyncRunSummary,
-) -> dict[str, Path]:
-    """Download collections one-by-one, reusing a single TorrentClient."""
+) -> None:
+    """Download collections one-by-one, importing each right after it finishes."""
     client: TorrentClient | None = None
-    download_results: dict[str, Path] = {}
     try:
         for collection, info in to_download.items():
             release_id = info["release_id"]
@@ -166,7 +241,11 @@ def _download_sequential(
                     on_progress=on_progress,
                     seed_base=seed_base,
                 )
-                download_results[collection] = payload_path
+                _import_payload(
+                    conn, collection, payload_path, info, work_dir, settings, summary
+                )
+            except GracefulShutdown:
+                raise
             except Exception as error:  # noqa: BLE001 - record failure, continue others
                 conn.rollback()
                 state.set_release_status(
@@ -178,7 +257,6 @@ def _download_sequential(
     finally:
         if client is not None:
             client.close()
-    return download_results
 
 
 # -- Main orchestration -------------------------------------------------------
@@ -274,8 +352,9 @@ def run_sync(
                 }
 
             # -- Phase 2: Download (parallel or sequential) -------------------
+            # Each finished download is imported immediately, so completed
+            # collections never wait for slower or stalled torrents.
 
-            download_results: dict[str, Path] = {}
             max_dl = settings.sync_max_downloads
 
             if max_dl > 1 and len(to_download) > 1:
@@ -304,7 +383,7 @@ def run_sync(
                     for future in as_completed(futures):
                         collection = futures[future]
                         release_id = to_download[collection]["release_id"]
-                        coll, payload, error = future.result()
+                        _coll, payload, error = future.result()
                         if error is not None:
                             conn.rollback()
                             state.set_release_status(
@@ -317,74 +396,19 @@ def run_sync(
                             summary.failed.append((collection, f"{error}"))
                             delete_payload(work_dir / to_download[collection]["release"].identifier)
                         else:
-                            download_results[collection] = payload
-                            logger.info("[%s] Download complete.", collection)
+                            logger.info("[%s] Download complete; starting import.", collection)
+                            _import_payload(
+                                conn,
+                                collection,
+                                payload,
+                                to_download[collection],
+                                work_dir,
+                                settings,
+                                summary,
+                            )
             else:
                 logger.info("Downloading %d collections sequentially.", len(to_download))
-                download_results = _download_sequential(
-                    conn, to_download, work_dir, settings, summary
-                )
-
-            # -- Phase 3: Sequential import -----------------------------------
-
-            for collection, payload_path in download_results.items():
-                release_id = to_download[collection]["release_id"]
-                release = to_download[collection]["release"]
-                try:
-                    # Guard again before import: DB will grow while payload exists.
-                    payload_bytes = payload_path.stat().st_size
-                    db_size_now = state.database_size_bytes(conn)
-                    decision = evaluate_storage(
-                        str(work_dir),
-                        db_size_now,
-                        payload_bytes * 1.1,  # DB growth estimate while payload on disk
-                        settings.storage_warn_gib,
-                        settings.storage_stop_gib,
-                    )
-                    logger.info("%s", decision.message)
-
-                    stats = import_release(conn, collection, payload_path, release_id, settings)
-                    validate_import(conn, release_id, stats)
-                    state.set_release_status(conn, release_id, "completed")
-                    state.update_download_progress(
-                        conn, release_id, payload_path.stat().st_size, payload_path.stat().st_size
-                    )
-
-                    if settings.sync_reuse_prev_payload:
-                        os.replace(payload_path, _prev_payload_path(work_dir, collection))
-                        logger.info("Payload kept as future seed base (%s).", collection)
-                    else:
-                        delete_payload(payload_path)
-
-                    discarded_note = f" discarded={stats.discarded}" if stats.discarded else ""
-                    logger.info(
-                        "[%s] %s done: seen=%d inserted=%d updated=%d skipped=%d%s "
-                        "failed=%d in %.0fs; db_size=%.2f GiB",
-                        collection,
-                        release.identifier[:70],
-                        stats.seen,
-                        stats.inserted,
-                        stats.updated,
-                        stats.skipped,
-                        discarded_note,
-                        stats.failed,
-                        time.time() - summary.started_at,
-                        state.database_size_bytes(conn) / GIB,
-                    )
-                    summary.processed.append((collection, release.identifier))
-                except GracefulShutdown:
-                    state.set_release_status(
-                        conn, release_id, "discovered", "Interrupted by shutdown (resumable)."
-                    )
-                    raise
-                except Exception as error:  # noqa: BLE001 - record failure, continue others
-                    conn.rollback()
-                    state.set_release_status(
-                        conn, release_id, "failed", f"{type(error).__name__}: {error}"[:2000]
-                    )
-                    logger.exception("[%s] Import failed: %s", collection, error)
-                    summary.failed.append((collection, f"{error}"))
-                    delete_payload(work_dir / release.identifier)
+                _download_sequential(conn, to_download, work_dir, settings, summary)
         finally:
             state.release_sync_lock(conn)
     finally:

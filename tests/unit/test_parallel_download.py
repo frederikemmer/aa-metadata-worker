@@ -94,10 +94,11 @@ class TestDownloadOne:
 
 
 class TestDownloadSequential:
-    """_download_sequential reuses a single TorrentClient."""
+    """_download_sequential reuses a single TorrentClient and imports inline."""
 
+    @patch("sync.run._import_payload")
     @patch("sync.run.TorrentClient")
-    def test_reuses_client_across_collections(self, mock_client_cls):
+    def test_reuses_client_across_collections(self, mock_client_cls, mock_import):
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_client.download.return_value = Path("payload")
@@ -123,18 +124,20 @@ class TestDownloadSequential:
             },
         }
 
-        results = _download_sequential(
+        _download_sequential(
             conn, to_download, Path("/work/sync"), settings, MagicMock()
         )
 
-        # Client created once, used for both downloads
+        # Client created once, used for both downloads; each download is
+        # followed immediately by its import.
         assert mock_client_cls.call_count == 1
         assert mock_client.download.call_count == 2
-        assert len(results) == 2
+        assert mock_import.call_count == 2
         mock_client.close.assert_called_once()
 
+    @patch("sync.run._import_payload")
     @patch("sync.run.TorrentClient")
-    def test_failed_download_does_not_stop_others(self, mock_client_cls):
+    def test_failed_download_does_not_stop_others(self, mock_client_cls, mock_import):
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
@@ -168,13 +171,13 @@ class TestDownloadSequential:
         summary = MagicMock()
         summary.failed = []
 
-        results = _download_sequential(
+        _download_sequential(
             conn, to_download, Path("/work/sync"), settings, summary
         )
 
-        # Second download succeeded despite first failure
-        assert len(results) == 1
-        assert "ia2_records" in results
+        # Second download succeeded despite first failure and was imported.
+        assert mock_import.call_count == 1
+        assert mock_import.call_args.args[1] == "ia2_records"
         assert len(summary.failed) == 1
         assert summary.failed[0][0] == "zlib3_records"
 
