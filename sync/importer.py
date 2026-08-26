@@ -78,41 +78,6 @@ ON CONFLICT (md5) DO UPDATE SET
     ipfs_cid = COALESCE(EXCLUDED.ipfs_cid, metadata_records.ipfs_cid)
 """
 
-_SELECT_EXISTING_SQL = """
-SELECT md5, title, authors, publisher, publication_year, languages, extension,
-       filesize, isbn10, isbn13, doi, oclc, openlibrary_ids, source_collection,
-       source_record_id, aacid, source_timestamp, quality_score, deleted,
-       removed_reason, ipfs_cid, series_name, series_position, edition
-FROM metadata_records
-WHERE md5 = ANY(%(md5s)s)
-"""
-
-_COLUMNS = (
-    "md5",
-    "title",
-    "authors",
-    "publisher",
-    "publication_year",
-    "languages",
-    "extension",
-    "filesize",
-    "isbn10",
-    "isbn13",
-    "doi",
-    "oclc",
-    "openlibrary_ids",
-    "source_collection",
-    "source_record_id",
-    "aacid",
-    "source_timestamp",
-    "quality_score",
-    "deleted",
-    "removed_reason",
-    "ipfs_cid",
-    "series_name",
-    "series_position",
-    "edition",
-)
 
 
 class GracefulShutdown(RuntimeError):
@@ -194,35 +159,6 @@ def record_to_params(record: NormalizedRecord) -> dict:
     }
 
 
-def _row_to_record(row: tuple) -> tuple[NormalizedRecord, int]:
-    data = dict(zip(_COLUMNS, row, strict=True))
-    record = NormalizedRecord(
-        md5=data["md5"],
-        title=data["title"] or "",
-        authors=list(data["authors"] or []),
-        publisher=data["publisher"],
-        publication_year=data["publication_year"],
-        languages=list(data["languages"] or []),
-        extension=data["extension"],
-        filesize=data["filesize"],
-        isbn13=list(data["isbn13"] or []),
-        isbn10=list(data["isbn10"] or []),
-        doi=list(data["doi"] or []),
-        oclc=list(data["oclc"] or []),
-        openlibrary_ids=list(data["openlibrary_ids"] or []),
-        series_name=data["series_name"],
-        series_position=data["series_position"],
-        edition=data["edition"],
-        source_collection=data["source_collection"],
-        source_record_id=data["source_record_id"],
-        aacid=data["aacid"],
-        source_timestamp=data["source_timestamp"],
-        deleted=bool(data["deleted"]),
-        removed_reason=data["removed_reason"],
-        ipfs_cid=data["ipfs_cid"],
-    )
-    return record, int(data["quality_score"])
-
 
 def process_batch(
     conn: psycopg.Connection,
@@ -232,7 +168,10 @@ def process_batch(
     """Merge one batch of parsed records into the database atomically.
 
     `records` items are (record, raw_line_for_errors). Duplicates inside a
-    batch are folded first so every md5 appears once per statement.
+    batch are folded first so every md5 appears once per statement. The
+    UPSERT's ON CONFLICT clause handles field-level merge (COALESCE for
+    provenance fields, GREATEST for quality_score), so we skip the costly
+    SELECT+merge round-trip against existing rows.
     """
     # Fold duplicates within the batch.
     folded: dict[bytes, tuple[NormalizedRecord, int]] = {}
@@ -245,34 +184,15 @@ def process_batch(
             merged, merged_score = merge_records(existing_entry[0], existing_entry[1], record)
             folded[record.md5] = (merged, merged_score)
 
-    md5_list = list(folded.keys())
-    params = {"md5s": md5_list}
-    existing_rows = conn.execute(_SELECT_EXISTING_SQL, params).fetchall()
-    existing_map: dict[bytes, tuple[NormalizedRecord, int]] = {}
-    for row in existing_rows:
-        rec, score = _row_to_record(row)
-        existing_map[rec.md5] = (rec, score)
-
     final_rows: list[dict] = []
-    inserted = 0
-    updated = 0
-    for md5 in md5_list:
-        incoming, incoming_score = folded[md5]
-        current = existing_map.get(md5)
-        if current is None:
-            final_rows.append({**record_to_params(incoming), "quality_score": incoming_score})
-            inserted += 1
-        else:
-            merged, merged_score = merge_records(current[0], current[1], incoming)
-            final_rows.append({**record_to_params(merged), "quality_score": merged_score})
-            updated += 1
+    for _md5, (incoming, incoming_score) in folded.items():
+        final_rows.append({**record_to_params(incoming), "quality_score": incoming_score})
 
     with conn.transaction():
         with conn.cursor() as cur:
             cur.executemany(_UPSERT_SQL, final_rows)
 
-    stats.inserted += inserted
-    stats.updated += updated
+    stats.inserted += len(final_rows)
     stats.batches += 1
 
 
