@@ -87,6 +87,23 @@ class TestDiscovery:
         found = find_release(manifest, "zlib3_records", "--20260706T193143Z.jsonl.seekable.zst")
         assert found.identifier.endswith("20240809T171652Z--20260706T193143Z.jsonl.seekable.zst")
 
+    def test_find_release_allows_obsolete_pin(self):
+        """Explicit overrides may pin obsolete releases (better-seeded escape hatch)."""
+        manifest = [
+            _entry(
+                "annas_archive_meta__aacid__zlib3_records__20240809T171652Z--20260706T193143Z.jsonl.seekable.zst.torrent",
+                obsolete=True,
+            ),
+            _entry(
+                "annas_archive_meta__aacid__zlib3_records__20240809T171652Z--20260821T041731Z.jsonl.seekable.zst.torrent"
+            ),
+        ]
+        found = find_release(manifest, "zlib3_records", "--20260706T193143Z.jsonl.seekable.zst")
+        assert found.identifier.endswith("--20260706T193143Z.jsonl.seekable.zst")
+        # latest_releases stays strict: obsolete entries never win automatically.
+        best = latest_releases(manifest, ["zlib3_records"])
+        assert best["zlib3_records"].identifier.endswith("--20260821T041731Z.jsonl.seekable.zst")
+
     def test_find_release_rejects_unknown_and_ambiguous(self):
         manifest = [
             _entry(

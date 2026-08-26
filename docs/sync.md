@@ -29,8 +29,9 @@ inkrementeller Update.
 
 ## Download
 
-* Die `.torrent`-Datei wird per HTTPS geladen, die Payload per BitTorrent
-  (eingebetteter libtorrent-Client im sync-Container).
+* Die `.torrent`-Datei wird per HTTPS geladen (mit Retries bei Mirror-Fehlern
+  wie 502; schlägt alles fehl, Fallback auf den Magnet-Link aus dem Manifest),
+  die Payload per BitTorrent (eingebetteter libtorrent-Client im sync-Container).
 * Payload landet in `sync_work` (Volume), wird nach erfolgreichem Import
   gelöscht. Temporärer Platzbedarf = komprimierte Releasegröße.
 * Kein Web-Scraping, keine Browser-Automatisierung, keine Anti-Bot-Umgehung.
@@ -168,7 +169,10 @@ docker compose run --rm sync python -m sync.cli bootstrap
 Standardmäßig wird immer das neueste Release einer Collection importiert. Hat
 das neueste Release (noch) keine Seeder, kann der Bootstrap/Run explizit auf ein
 älteres, kumulatives Release gepinnt werden – alle seekbaren Releases teilen
-einen byte-identischen Prefix; spätere Syncs laden nur das Delta:
+einen byte-identischen Prefix; spätere Syncs laden nur das Delta. Gepinnte
+Releases dürfen auch bereits `obsolete` sein: supersede ältere Releases bleiben
+meist von AA geseedet (`aa_currently_seeding`), während das neueste Release
+direkt nach Veröffentlichung oft noch 0 Seeders hat:
 
 ```bash
 python -m sync.cli bootstrap \
@@ -177,4 +181,6 @@ python -m sync.cli bootstrap \
 ```
 
 Der Suffix muss das Release-Identifier-Ende eindeutig identifizieren; bei 0 oder
-mehreren Treffern bricht der Lauf vor dem Download mit Fehler ab.
+mehreren Treffern bricht der Lauf vor dem Download mit Fehler ab. Nur der
+explizite Pin darf `obsolete`-Releases wählen – die automatische Auswahl
+(`latest_releases`) bleibt strikt auf nicht-obsolete Releases beschränkt.

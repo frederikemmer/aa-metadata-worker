@@ -37,9 +37,9 @@ class ReleaseInfo:
     data_size_bytes: int
 
 
-def parse_release(entry: dict) -> ReleaseInfo | None:
+def _parse_entry(entry: dict, *, allow_obsolete: bool) -> ReleaseInfo | None:
     name = entry.get("display_name") or ""
-    if not entry.get("is_metadata") or entry.get("obsolete"):
+    if not entry.get("is_metadata") or (entry.get("obsolete") and not allow_obsolete):
         return None
     stem = name.removesuffix(".torrent")
     match = _RELEASE_RE.match(stem)
@@ -53,6 +53,10 @@ def parse_release(entry: dict) -> ReleaseInfo | None:
         magnet_link=entry.get("magnet_link") or "",
         data_size_bytes=int(entry.get("data_size") or 0),
     )
+
+
+def parse_release(entry: dict) -> ReleaseInfo | None:
+    return _parse_entry(entry, allow_obsolete=False)
 
 
 def fetch_manifest(base_url: str, timeout_s: float = 60.0, retries: int = 3) -> list[dict]:
@@ -92,20 +96,22 @@ def find_release(manifest: list[dict], collection: str, identifier_suffix: str) 
     """Find exactly one release of `collection` whose identifier ends with the suffix.
 
     Operational escape hatch for bootstrapping from an older (better seeded)
-    cumulative release when the newest one has no seeders yet. Raises ValueError
-    with the candidate list on zero or ambiguous matches.
+    cumulative release when the newest one has no seeders yet. Explicitly
+    pinned (obsolete) releases are allowed here — superseded cumulative
+    releases usually stay seeded by AA and share a byte-identical prefix, so
+    later syncs catch up cheaply. Raises ValueError with the candidate list on
+    zero or ambiguous matches.
     """
     candidates = [
         release
         for entry in manifest
-        if (release := parse_release(entry)) is not None
+        if (release := _parse_entry(entry, allow_obsolete=True)) is not None
         and release.collection == collection
         and release.identifier.endswith(identifier_suffix)
     ]
     if not candidates:
         raise ValueError(
-            f"No release found for collection '{collection}' "
-            f"with identifier suffix '{identifier_suffix}'."
+            f"No release found for collection '{collection}' with identifier suffix '{identifier_suffix}'."
         )
     if len(candidates) > 1:
         raise ValueError(

@@ -66,10 +66,20 @@ class TorrentClient:
         self._session.add_dht_router("dht.libtorrent.org", 25401)
         logger.info("libtorrent session initialized with DHT/PEX enabled")
 
-    def _fetch_torrent_bytes(self, torrent_url: str) -> bytes:
-        response = httpx.get(torrent_url, timeout=60.0, follow_redirects=True)
-        response.raise_for_status()
-        return response.content
+    @staticmethod
+    def _fetch_torrent_bytes(torrent_url: str, timeout_s: float = 60.0, retries: int = 3) -> bytes:
+        """Fetch the .torrent file with retries — mirrors are flaky (502s)."""
+        last_error: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = httpx.get(torrent_url, timeout=timeout_s, follow_redirects=True)
+                response.raise_for_status()
+                return response.content
+            except Exception as error:  # noqa: BLE001 - retry any transport/HTTP failure
+                last_error = error
+                logger.warning("Torrent file fetch failed (attempt %d/%d): %s", attempt, retries, error)
+                time.sleep(min(2**attempt, 30))
+        raise RuntimeError(f"Could not fetch torrent file from {torrent_url}: {last_error}")
 
     @staticmethod
     def _link_seed_base(seed_base: Path | None, target: Path) -> bool:
@@ -121,8 +131,16 @@ class TorrentClient:
 
         info_params = {}
         if torrent_url:
-            torrent_bytes = self._fetch_torrent_bytes(torrent_url)
-            info_params["ti"] = lt.torrent_info(lt.bdecode(torrent_bytes))
+            try:
+                torrent_bytes = self._fetch_torrent_bytes(torrent_url)
+                info_params["ti"] = lt.torrent_info(lt.bdecode(torrent_bytes))
+            except Exception as error:  # noqa: BLE001 - fall back to magnet below
+                if not magnet_link:
+                    raise TorrentDownloadError(
+                        f"Could not fetch torrent file {torrent_url} and no magnet link available"
+                    ) from error
+                logger.warning("Torrent URL failed after retries (%s); falling back to magnet link.", error)
+                info_params["url"] = magnet_link
         elif magnet_link:
             info_params["url"] = magnet_link
         else:
