@@ -79,6 +79,7 @@ services:
       SYNC_SCHEDULE: "03:15"                     # HH:MM Europe/Berlin
       SYNC_BATCH_SIZE: "20000"
       SYNC_ERROR_ABORT_RATE: "0.02"              # Import abbrechen ab 2 % Fehlerrate
+      SYNC_MAX_DOWNLOADS: "4"                    # Parallele Torrent-Downloads
 
       # Storage-Budget (GiB): Warnung / harter Stopp für Downloads+Imports
       STORAGE_WARN_GIB: "300"
@@ -89,8 +90,8 @@ services:
       # Dashboard + API im LAN erreichbar (z. B. http://<server-ip>:8010/dashboard).
       - "8010:8010"
       # libtorrent Peer-to-Peer (DHT/PEX) — noinspection DockerComposeResolvePortInspection
-      - "6881:6881"
-      - "6881:6881/udp"
+      - "6881-6885:6881-6885"
+      - "6881-6885:6881-6885/udp"
     read_only: true
     tmpfs:
       - /tmp:size=512m

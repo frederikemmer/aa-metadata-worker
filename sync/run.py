@@ -86,6 +86,7 @@ def _download_one(
     release_id: int,
     work_dir: Path,
     settings: Settings,
+    listen_port: int = 6881,
 ) -> tuple[str, Path | None, Exception | None]:
     """Download a single collection in its own thread.
 
@@ -96,7 +97,7 @@ def _download_one(
     client: TorrentClient | None = None
     try:
         conn = connect(settings)
-        client = TorrentClient(work_dir)
+        client = TorrentClient(work_dir, listen_port=listen_port)
 
         seed_base = (
             _prev_payload_path(work_dir, collection)
@@ -285,7 +286,7 @@ def run_sync(
                 )
                 futures = {}
                 with ThreadPoolExecutor(max_workers=max_dl) as pool:
-                    for collection, info in to_download.items():
+                    for idx, (collection, info) in enumerate(to_download.items()):
                         release = info["release"]
                         future = pool.submit(
                             _download_one,
@@ -296,6 +297,7 @@ def run_sync(
                             info["release_id"],
                             work_dir,
                             settings,
+                            listen_port=6881 + idx,
                         )
                         futures[future] = collection
 
