@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import signal
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,13 +38,15 @@ _UPSERT_SQL = """
 INSERT INTO metadata_records (
     md5, title, title_norm, authors, author_tokens, publisher, publication_year,
     languages, extension, filesize, isbn10, isbn13, doi, oclc, openlibrary_ids,
-    work_key, source_collection, source_record_id, aacid, source_timestamp,
+    work_key, series_name, series_position, edition,
+    source_collection, source_record_id, aacid, source_timestamp,
     quality_score, deleted, removed_reason, ipfs_cid
 ) VALUES (
     %(md5)s, %(title)s, %(title_norm)s, %(authors)s, %(author_tokens)s, %(publisher)s,
     %(publication_year)s, %(languages)s, %(extension)s, %(filesize)s,
     %(isbn10)s, %(isbn13)s, %(doi)s, %(oclc)s, %(openlibrary_ids)s,
-    %(work_key)s, %(source_collection)s, %(source_record_id)s, %(aacid)s,
+    %(work_key)s, %(series_name)s, %(series_position)s, %(edition)s,
+    %(source_collection)s, %(source_record_id)s, %(aacid)s,
     %(source_timestamp)s, %(quality_score)s, %(deleted)s, %(removed_reason)s, %(ipfs_cid)s
 )
 ON CONFLICT (md5) DO UPDATE SET
@@ -62,6 +65,9 @@ ON CONFLICT (md5) DO UPDATE SET
     oclc = EXCLUDED.oclc,
     openlibrary_ids = EXCLUDED.openlibrary_ids,
     work_key = EXCLUDED.work_key,
+    series_name = COALESCE(EXCLUDED.series_name, metadata_records.series_name),
+    series_position = COALESCE(EXCLUDED.series_position, metadata_records.series_position),
+    edition = COALESCE(EXCLUDED.edition, metadata_records.edition),
     source_collection = EXCLUDED.source_collection,
     source_record_id = EXCLUDED.source_record_id,
     aacid = EXCLUDED.aacid,
@@ -76,7 +82,7 @@ _SELECT_EXISTING_SQL = """
 SELECT md5, title, authors, publisher, publication_year, languages, extension,
        filesize, isbn10, isbn13, doi, oclc, openlibrary_ids, source_collection,
        source_record_id, aacid, source_timestamp, quality_score, deleted,
-       removed_reason, ipfs_cid
+       removed_reason, ipfs_cid, series_name, series_position, edition
 FROM metadata_records
 WHERE md5 = ANY(%(md5s)s)
 """
@@ -103,6 +109,9 @@ _COLUMNS = (
     "deleted",
     "removed_reason",
     "ipfs_cid",
+    "series_name",
+    "series_position",
+    "edition",
 )
 
 
@@ -164,6 +173,9 @@ def record_to_params(record: NormalizedRecord) -> dict:
         "oclc": record.oclc,
         "openlibrary_ids": record.openlibrary_ids,
         "work_key": derive_work_key(record.isbn13, record.isbn10, record.doi, record.openlibrary_ids),
+        "series_name": record.series_name,
+        "series_position": record.series_position,
+        "edition": record.edition,
         "source_collection": record.source_collection,
         "source_record_id": record.source_record_id,
         "aacid": record.aacid,
@@ -191,6 +203,9 @@ def _row_to_record(row: tuple) -> tuple[NormalizedRecord, int]:
         doi=list(data["doi"] or []),
         oclc=list(data["oclc"] or []),
         openlibrary_ids=list(data["openlibrary_ids"] or []),
+        series_name=data["series_name"],
+        series_position=data["series_position"],
+        edition=data["edition"],
         source_collection=data["source_collection"],
         source_record_id=data["source_record_id"],
         aacid=data["aacid"],
@@ -254,13 +269,36 @@ def process_batch(
     stats.batches += 1
 
 
-def iter_jsonl(payload_path: Path):
-    """Stream-decompress a .jsonl(.seekable).zst file line by line."""
+class _CountingFile:
+    """Thin wrapper counting compressed bytes read from the payload file."""
+
+    def __init__(self, file_obj):
+        self._file = file_obj
+        self.bytes_read = 0
+
+    def read(self, size=-1):
+        data = self._file.read(size)
+        self.bytes_read += len(data)
+        return data
+
+    def __getattr__(self, name):  # pragma: no cover - delegation
+        return getattr(self._file, name)
+
+
+def iter_jsonl(payload_path: Path, on_bytes=None):
+    """Stream-decompress a .jsonl(.seekable).zst file line by line.
+
+    `on_bytes(compressed_bytes_read)` is invoked after every chunk pulled from
+    the underlying file (used for live import-progress reporting).
+    """
     with open(payload_path, "rb") as raw_file:
+        counting = _CountingFile(raw_file)
         decompressor = zstandard.ZstdDecompressor(max_window_size=2**27)
-        stream = decompressor.stream_reader(raw_file)
+        stream = decompressor.stream_reader(counting)
         text_stream = io.TextIOWrapper(stream, encoding="utf-8", errors="replace")
         for line in text_stream:
+            if on_bytes is not None:
+                on_bytes(counting.bytes_read)
             line = line.strip()
             if line:
                 yield line
@@ -317,7 +355,24 @@ def import_release(
             flushed[key] = getattr(stats, key)
         batch = []
 
-    for line in iter_jsonl(payload_path):
+    # Live import progress: report compressed-byte position, throttled.
+    total_bytes = payload_path.stat().st_size
+    last_progress = 0.0
+
+    def on_bytes(done: int) -> None:
+        nonlocal last_progress
+        now = time.monotonic()
+        if now - last_progress < 3.0:
+            return
+        last_progress = now
+        try:
+            state.update_import_progress(conn, release_id, min(done, total_bytes), total_bytes)
+        except Exception:  # noqa: BLE001 - progress reporting must never kill imports
+            pass
+
+    state.update_import_progress(conn, release_id, 0, total_bytes)
+
+    for line in iter_jsonl(payload_path, on_bytes=on_bytes):
         if _shutdown_requested:
             flush()
             raise GracefulShutdown("SIGTERM received during import")
@@ -350,6 +405,7 @@ def import_release(
                 )
 
     flush()
+    state.update_import_progress(conn, release_id, total_bytes, total_bytes)
 
     failure_rate = stats.failed / max(stats.seen, 1)
     if stats.seen == 0:

@@ -251,11 +251,16 @@ function render(d){
   } else {
     el.innerHTML = actives.map(a=>{
       let bar='';
-      if(a.downloadTotalBytes>0){
+      if(a.status==='downloading' && a.downloadTotalBytes>0){
         const p=Math.min(100,a.downloadDoneBytes/a.downloadTotalBytes*100);
         bar=`<div class="bar"><div style="width:${p}%"></div></div>
              <div class="small">Download: ${gib(a.downloadDoneBytes)} / ${gib(a.downloadTotalBytes)} (${p.toFixed(1)}%)</div>
-             ${a.status==='downloading'?trackDownload(a):''}`;
+             ${trackDownload(a)}`;
+      }
+      if(a.importTotalBytes>0 && a.status!=='downloading'){
+        const ip=a.importTotalBytes>0?Math.min(100,a.importDoneBytes/a.importTotalBytes*100):0;
+        bar+=`<div class="bar" style="margin-top:10px"><div style="width:${ip}%;background:var(--ok)"></div></div>
+              <div class="small">Import: ${gib(a.importDoneBytes)} / ${gib(a.importTotalBytes)} (${ip.toFixed(1)}%)</div>`;
       }
       return `<div style="padding:10px 0;border-bottom:1px solid var(--line)">
         <div>${pill(a.status)} <b>${a.collection}</b>

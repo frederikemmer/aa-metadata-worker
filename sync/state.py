@@ -135,7 +135,8 @@ def set_release_status(
     completed = ", completed_at = now()" if status == "completed" else ""
     counters = (
         ", records_seen = 0, records_inserted = 0, records_updated = 0, "
-        "records_skipped = 0, records_failed = 0"
+        "records_skipped = 0, records_failed = 0, "
+        "import_done_bytes = 0, import_total_bytes = 0"
         if reset_counters
         else ""
     )
@@ -184,6 +185,22 @@ def update_download_progress(
     """Persist live torrent progress for the dashboard (throttled by caller)."""
     conn.execute(
         "UPDATE sync_releases SET download_done_bytes = %s, download_total_bytes = %s WHERE id = %s",
+        (done_bytes, total_bytes, release_id),
+    )
+
+
+def update_import_progress(
+    conn: psycopg.Connection,
+    release_id: int,
+    done_bytes: int,
+    total_bytes: int,
+) -> None:
+    """Persist live import progress (compressed bytes consumed) for the dashboard.
+
+    Throttled by the caller; errors must never abort an import.
+    """
+    conn.execute(
+        "UPDATE sync_releases SET import_done_bytes = %s, import_total_bytes = %s WHERE id = %s",
         (done_bytes, total_bytes, release_id),
     )
 
