@@ -66,7 +66,6 @@ class GoodreadsAdapter(SourceAdapter):
                 filesize=None,
                 isbn13=isbn13,
                 isbn10=isbn10,
-                edition=_text(book.find("edition_information")) or None,
                 source_collection=self.collection,
                 source_record_id=str(record_id),
                 aacid=raw.get("aacid"),
