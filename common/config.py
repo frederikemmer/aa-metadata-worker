@@ -83,6 +83,10 @@ class Settings:
     # download changed pieces (AAC cumulative releases share identical prefixes).
     sync_reuse_prev_payload: bool = True
 
+    # Parallel torrent downloads: number of collections downloaded concurrently.
+    # Set to 0 to fall back to sequential downloads (old behaviour).
+    sync_max_downloads: int = 4
+
     # Storage guard (GiB). Defaults sized for NAS deployment (see docs/sync.md).
     storage_warn_gib: int = 300
     storage_stop_gib: int = 400
@@ -133,6 +137,7 @@ def load_settings() -> Settings:
         gbooks_require_books=_env_bool("AA_GBOOKS_REQUIRE_BOOKS", True),
         libby_allowed_types=_env_list("AA_LIBBY_ALLOWED_TYPES", ["ebook", "audiobook"]),
         sync_reuse_prev_payload=_env_bool("SYNC_REUSE_PREV_PAYLOAD", True),
+        sync_max_downloads=_env_int("SYNC_MAX_DOWNLOADS", 4),
         storage_warn_gib=_env_int("STORAGE_WARN_GIB", 300),
         storage_stop_gib=_env_int("STORAGE_STOP_GIB", 400),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),

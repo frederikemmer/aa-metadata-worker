@@ -31,7 +31,7 @@ class TorrentDownloadError(RuntimeError):
 class TorrentClient:
     """Downloads one .jsonl.seekable.zst file into `download_dir` at a time."""
 
-    def __init__(self, download_dir: str | Path):
+    def __init__(self, download_dir: str | Path, *, listen_port: int = 6881):
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -43,7 +43,7 @@ class TorrentClient:
             ) from error
         self._lt = lt
         params: dict = {
-            "listen_interfaces": "0.0.0.0:6881",
+            "listen_interfaces": f"0.0.0.0:{listen_port}",
             "alert_mask": lt.alert.category_t.status_notification,
             "active_downloads": 2,
             "active_seeds": 2,

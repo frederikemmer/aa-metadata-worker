@@ -1,10 +1,13 @@
 """End-to-end sync orchestration for all configured collections.
 
-Flow per collection/release:
-  discover -> ensure sync_releases row -> skip completed -> storage guard ->
-  download torrent (reusing the previous payload as seed base so only changed
-  pieces are transferred) -> stream-import -> validate -> mark completed ->
-  keep payload as next seed base -> cleanup.
+Flow:
+  1. Discover releases, skip completed, check storage guard.
+  2. Download torrents (optionally parallel via SYNC_MAX_DOWNLOADS).
+  3. Stream-import each completed payload sequentially.
+
+Parallel downloads speed up the sync when collections have few seeders –
+the bottleneck is typically peer availability, not local bandwidth.  Each
+download thread owns its own libtorrent session and DB connection.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,6 +75,114 @@ def _guard_or_block(
     return decision.allowed
 
 
+# -- Parallel download worker ------------------------------------------------
+
+
+def _download_one(
+    collection: str,
+    release_identifier: str,
+    torrent_url: str,
+    magnet_link: str,
+    release_id: int,
+    work_dir: Path,
+    settings: Settings,
+) -> tuple[str, Path | None, Exception | None]:
+    """Download a single collection in its own thread.
+
+    Returns (collection, payload_path, error).  Each thread creates its own
+    TorrentClient (libtorrent session) and DB connection for thread safety.
+    """
+    conn: psycopg.Connection | None = None
+    client: TorrentClient | None = None
+    try:
+        conn = connect(settings)
+        client = TorrentClient(work_dir)
+
+        seed_base = (
+            _prev_payload_path(work_dir, collection)
+            if settings.sync_reuse_prev_payload
+            else None
+        )
+
+        def on_progress(done: int, total: int, _rid: int = release_id) -> None:
+            state.update_download_progress(conn, _rid, done, total)
+
+        payload_path = client.download(
+            release_identifier,
+            torrent_url,
+            magnet_link,
+            on_progress=on_progress,
+            seed_base=seed_base,
+        )
+        return collection, payload_path, None
+    except Exception as error:  # noqa: BLE001 - catch everything for worker
+        return collection, None, error
+    finally:
+        if client is not None:
+            client.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+
+
+# -- Sequential download (original behaviour) --------------------------------
+
+
+def _download_sequential(
+    conn: psycopg.Connection,
+    to_download: dict[str, dict],
+    work_dir: Path,
+    settings: Settings,
+    summary: SyncRunSummary,
+) -> dict[str, Path]:
+    """Download collections one-by-one, reusing a single TorrentClient."""
+    client: TorrentClient | None = None
+    download_results: dict[str, Path] = {}
+    try:
+        for collection, info in to_download.items():
+            release_id = info["release_id"]
+            release = info["release"]
+            try:
+                state.set_release_status(conn, release_id, "downloading", reset_counters=True)
+                if client is None:
+                    client = TorrentClient(work_dir)
+
+                seed_base = (
+                    _prev_payload_path(work_dir, collection)
+                    if settings.sync_reuse_prev_payload
+                    else None
+                )
+
+                def on_progress(done: int, total: int, _rid: int = release_id) -> None:
+                    state.update_download_progress(conn, _rid, done, total)
+
+                payload_path = client.download(
+                    release.identifier,
+                    release.torrent_url,
+                    release.magnet_link,
+                    on_progress=on_progress,
+                    seed_base=seed_base,
+                )
+                download_results[collection] = payload_path
+            except Exception as error:  # noqa: BLE001 - record failure, continue others
+                conn.rollback()
+                state.set_release_status(
+                    conn, release_id, "failed", f"{type(error).__name__}: {error}"[:2000]
+                )
+                logger.exception("[%s] Release failed: %s", collection, error)
+                summary.failed.append((collection, f"{error}"))
+                delete_payload(work_dir / release.identifier)
+    finally:
+        if client is not None:
+            client.close()
+    return download_results
+
+
+# -- Main orchestration -------------------------------------------------------
+
+
 def run_sync(
     collections: list[str] | None = None,
     force: bool = False,
@@ -79,6 +191,10 @@ def run_sync(
     release_overrides: dict[str, str] | None = None,
 ) -> SyncRunSummary:
     """One incremental sync pass over the configured/newest releases.
+
+    When ``sync_max_downloads > 1`` collections are downloaded in parallel
+    (each in its own libtorrent session and DB connection).  Import is always
+    sequential to keep DB write throughput predictable.
 
     `release_overrides` maps collection -> identifier suffix to pin a specific
     release instead of the newest one (e.g. bootstrapping from an older,
@@ -89,7 +205,6 @@ def run_sync(
     work_dir = work_dir or Path("/work/sync")
     wanted_collections = collections or settings.aa_collections
     summary = SyncRunSummary()
-    client: TorrentClient | None = None  # set early so finally-blocks stay safe
 
     conn = connect(settings)
     try:
@@ -109,6 +224,10 @@ def run_sync(
             missing = set(wanted_collections) - set(releases.keys())
             for collection in sorted(missing):
                 logger.warning("No metadata release found for collection '%s'.", collection)
+
+            # -- Phase 1: Discovery, skip completed, storage guard -----------
+
+            to_download: dict[str, dict] = {}
 
             for collection in wanted_collections:
                 release = releases.get(collection)
@@ -147,26 +266,69 @@ def run_sync(
                     summary.blocked.append((collection, release.identifier))
                     continue
 
+                state.set_release_status(conn, release_id, "downloading", reset_counters=True)
+                to_download[collection] = {
+                    "release": release,
+                    "release_id": release_id,
+                }
+
+            # -- Phase 2: Download (parallel or sequential) -------------------
+
+            download_results: dict[str, Path] = {}
+            max_dl = settings.sync_max_downloads
+
+            if max_dl > 1 and len(to_download) > 1:
+                logger.info(
+                    "Downloading %d collections in parallel (max_workers=%d).",
+                    len(to_download),
+                    max_dl,
+                )
+                futures = {}
+                with ThreadPoolExecutor(max_workers=max_dl) as pool:
+                    for collection, info in to_download.items():
+                        release = info["release"]
+                        future = pool.submit(
+                            _download_one,
+                            collection,
+                            release.identifier,
+                            release.torrent_url,
+                            release.magnet_link,
+                            info["release_id"],
+                            work_dir,
+                            settings,
+                        )
+                        futures[future] = collection
+
+                    for future in as_completed(futures):
+                        collection = futures[future]
+                        release_id = to_download[collection]["release_id"]
+                        coll, payload, error = future.result()
+                        if error is not None:
+                            conn.rollback()
+                            state.set_release_status(
+                                conn,
+                                release_id,
+                                "failed",
+                                f"{type(error).__name__}: {error}"[:2000],
+                            )
+                            logger.exception("[%s] Download failed: %s", collection, error)
+                            summary.failed.append((collection, f"{error}"))
+                            delete_payload(work_dir / to_download[collection]["release"].identifier)
+                        else:
+                            download_results[collection] = payload
+                            logger.info("[%s] Download complete.", collection)
+            else:
+                logger.info("Downloading %d collections sequentially.", len(to_download))
+                download_results = _download_sequential(
+                    conn, to_download, work_dir, settings, summary
+                )
+
+            # -- Phase 3: Sequential import -----------------------------------
+
+            for collection, payload_path in download_results.items():
+                release_id = to_download[collection]["release_id"]
+                release = to_download[collection]["release"]
                 try:
-                    state.set_release_status(conn, release_id, "downloading", reset_counters=True)
-                    if client is None:
-                        client = TorrentClient(work_dir)
-
-                    seed_base = (
-                        _prev_payload_path(work_dir, collection) if settings.sync_reuse_prev_payload else None
-                    )
-
-                    def on_progress(done: int, total: int, _rid=release_id) -> None:
-                        state.update_download_progress(conn, _rid, done, total)
-
-                    payload_path = client.download(
-                        release.identifier,
-                        release.torrent_url,
-                        release.magnet_link,
-                        on_progress=on_progress,
-                        seed_base=seed_base,
-                    )
-
                     # Guard again before import: DB will grow while payload exists.
                     payload_bytes = payload_path.stat().st_size
                     db_size_now = state.database_size_bytes(conn)
@@ -187,7 +349,6 @@ def run_sync(
                     )
 
                     if settings.sync_reuse_prev_payload:
-                        # Keep as seed base for the next incremental release.
                         os.replace(payload_path, _prev_payload_path(work_dir, collection))
                         logger.info("Payload kept as future seed base (%s).", collection)
                     else:
@@ -219,14 +380,11 @@ def run_sync(
                     state.set_release_status(
                         conn, release_id, "failed", f"{type(error).__name__}: {error}"[:2000]
                     )
-                    logger.exception("[%s] Release failed: %s", collection, error)
+                    logger.exception("[%s] Import failed: %s", collection, error)
                     summary.failed.append((collection, f"{error}"))
-                    # Remove the temporary payload/link; the previous seed base stays intact.
                     delete_payload(work_dir / release.identifier)
         finally:
             state.release_sync_lock(conn)
-            if client is not None:
-                client.close()
     finally:
         conn.close()
 
