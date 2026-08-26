@@ -102,6 +102,16 @@ class Ia2Adapter(SourceAdapter):
 
         year = normalize_year(ia_meta.get("date"))
 
+        series_name = _as_text(ia_meta.get("series")) or None
+        series_pos_raw = ia_meta.get("volume")
+        series_position = None
+        if series_pos_raw is not None:
+            try:
+                series_position = int(str(series_pos_raw).strip())
+            except (TypeError, ValueError):
+                pass
+        edition = _as_text(ia_meta.get("edition")) or None
+
         records: list[NormalizedRecord] = []
         seen_md5: set[bytes] = set()
         for file_info in files:
@@ -132,6 +142,9 @@ class Ia2Adapter(SourceAdapter):
                     doi=[],
                     oclc=list(oclc),
                     openlibrary_ids=ol_ids,
+                    series_name=series_name,
+                    series_position=series_position,
+                    edition=edition,
                     source_collection=self.collection,
                     source_record_id=str(meta.get("ia_id")) if meta.get("ia_id") else None,
                     aacid=raw.get("aacid"),

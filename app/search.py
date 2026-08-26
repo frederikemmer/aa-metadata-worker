@@ -30,12 +30,15 @@ _CURSOR_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 _BASE_SELECT = """
 SELECT md5, title, authors, publisher, publication_year, languages, extension,
        filesize, isbn10, isbn13, doi, oclc, openlibrary_ids, work_key,
-       source_collection, source_record_id, aacid, rank
+       series_name, series_position, edition,
+       source_collection, source_record_id, aacid, rank, edition_count
 FROM (
     SELECT md5, title, authors, publisher, publication_year, languages, extension,
            filesize, isbn10, isbn13, doi, oclc, openlibrary_ids, work_key,
+           series_name, series_position, edition,
            source_collection, source_record_id, aacid,
-           COALESCE(ts_rank_cd(search_tsv, query, 32), 0) AS rank
+           COALESCE(ts_rank_cd(search_tsv, query, 32), 0) AS rank,
+           COUNT(*) OVER (PARTITION BY work_key) AS edition_count
     FROM metadata_records, {tsquery_join}
     WHERE NOT deleted AND (query IS NULL OR search_tsv @@ query) {extra_filters}
 ) candidates
@@ -82,6 +85,8 @@ def build_search_sql(
     isbn: str | None = None,
     doi_param: str | None = None,
     language: str | None = None,
+    series: str | None = None,
+    series_position: int | None = None,
     extension: str | None = None,
     year_from: int | None = None,
     year_to: int | None = None,
@@ -142,6 +147,19 @@ def build_search_sql(
         params["language"] = [lang_code]
         extra_filters += " AND languages @> %(language)s"
 
+    if series:
+        series_tokens = _TOKEN_RE.findall(normalize_text(series))
+        if series_tokens:
+            params["series_query"] = " & ".join(f"{t}:*" for t in series_tokens)
+            extra_filters += (
+                " AND to_tsvector('simple', coalesce(series_name, ''))"
+                " @@ to_tsquery('simple', %(series_query)s)"
+            )
+
+    if series_position is not None:
+        params["series_position"] = series_position
+        extra_filters += " AND series_position = %(series_position)s"
+
     if extension:
         if not re.fullmatch(r"[a-z0-9]{1,10}", extension.lower()):
             raise ValueError("Invalid extension")
@@ -187,10 +205,14 @@ def row_to_record_response(row: tuple) -> RecordResponse:
         oclc,
         openlibrary_ids,
         work_key,
+        series_name,
+        series_position,
+        edition,
         source_collection,
         source_record_id,
         aacid,
         _rank,
+        edition_count,
     ) = row
     return RecordResponse(
         md5=bytes(md5).hex(),
@@ -209,11 +231,15 @@ def row_to_record_response(row: tuple) -> RecordResponse:
             openlibrary=list(openlibrary_ids or []),
         ),
         workKey=work_key,
+        seriesName=series_name,
+        seriesPosition=series_position,
+        edition=edition,
         source=SourceInfo(
             collection=source_collection,
             record_id=source_record_id,
             aacid=aacid,
         ),
+        editionCount=int(edition_count) if edition_count else None,
     )
 
 

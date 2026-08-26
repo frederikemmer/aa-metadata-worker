@@ -27,7 +27,9 @@ def get_record(md5: str, conn: psycopg.Connection = GetConnectionDependency) -> 
         """
         SELECT md5, title, authors, publisher, publication_year, languages, extension,
                filesize, isbn10, isbn13, doi, oclc, openlibrary_ids, work_key,
-               source_collection, source_record_id, aacid, 0::float8 AS rank
+               series_name, series_position, edition,
+               source_collection, source_record_id, aacid, 0::float8 AS rank,
+               1::bigint AS edition_count
         FROM metadata_records WHERE md5 = %s
         """,
         (bytes.fromhex(md5_lower),),

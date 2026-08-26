@@ -49,6 +49,33 @@
         padding:6px 8px;font-size:12px;width:170px}
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#1d3a5f;
          color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;display:none;z-index:9}
+  .search-bar{display:flex;gap:8px;margin-top:10px}
+  .search-bar input{flex:1;padding:9px 12px;font-size:14px;width:auto}
+  .search-bar select{background:#10151b;border:1px solid var(--line);color:var(--text);border-radius:6px;
+         padding:9px 10px;font-size:13px;cursor:pointer}
+  .search-bar button{padding:9px 18px;font-size:14px}
+  #search-results{margin-top:12px}
+  #search-results table td{cursor:default}
+  #search-results .title-link{color:var(--accent);cursor:pointer;text-decoration:none}
+  #search-results .title-link:hover{text-decoration:underline}
+  .search-info{font-size:12px;color:var(--dim);margin-top:8px}
+  .search-info b{color:var(--text)}
+  .load-more{margin-top:10px;text-align:center}
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:10;display:flex;
+         align-items:center;justify-content:center}
+  .modal-overlay.hidden{display:none}
+  .modal{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px 28px;
+         max-width:700px;width:95%;max-height:85vh;overflow-y:auto;position:relative}
+  .modal h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:12px}
+  .modal .close-btn{position:absolute;top:14px;right:16px;background:none;border:none;color:var(--dim);
+         font-size:20px;cursor:pointer;line-height:1}
+  .modal .close-btn:hover{color:var(--text)}
+  .modal .field{margin-bottom:10px}
+  .modal .field-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:2px}
+  .modal .field-value{font-size:14px;word-break:break-word}
+  .modal .field-value.mono{font-family:ui-monospace,"Cascadia Code","Source Code Pro",monospace;font-size:13px}
+  .modal .ident-grid{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+  .modal .ident-grid .ident-key{color:var(--dim);text-transform:uppercase;font-size:11px;letter-spacing:.04em}
 </style>
 </head>
 <body>
@@ -90,6 +117,33 @@
     <th>Collection</th><th>Release</th><th>Status</th><th class="num">Gesehen</th><th>Fehlermeldung</th>
   </tr></thead><tbody></tbody></table>
 </section>
+
+<section class="card">
+  <h2>Datenbank durchsuchen</h2>
+  <div class="search-bar">
+    <input type="text" id="search-input" placeholder="Suchbegriff eingeben…">
+    <select id="search-field">
+      <option value="q">Alles</option>
+      <option value="title">Titel</option>
+      <option value="author">Autor</option>
+      <option value="isbn">ISBN</option>
+      <option value="doi">DOI</option>
+      <option value="language">Sprache</option>
+      <option value="series">Reihe</option>
+      <option value="extension">Format</option>
+    </select>
+    <button class="primary" id="btn-search">Suchen</button>
+  </div>
+  <div id="search-results"></div>
+</section>
+
+<div class="modal-overlay hidden" id="modal-overlay">
+  <div class="modal" id="modal-content">
+    <button class="close-btn" id="modal-close">&times;</button>
+    <h2>Details</h2>
+    <div id="modal-body"></div>
+  </div>
+</div>
 
 <script>
 const fmt = n => (n ?? 0).toLocaleString('de-DE');
@@ -305,6 +359,167 @@ tick();
 checkLatestRelease();
 setInterval(tick, 2000);
 setInterval(checkLatestRelease, 300000);
+
+// --- Search ---
+let searchCursor = null, searchTotal = 0, searchQuery = '', searchField = 'q', searchLoading = false;
+
+const fieldLabels = {q:'Alles',title:'Titel',author:'Autor',isbn:'ISBN',doi:'DOI',
+  language:'Sprache',series:'Reihe',extension:'Format'};
+const langNames = {eng:'Englisch',deu:'Deutsch',fre:'Französisch',spa:'Spanisch',ita:'Italienisch',
+  por:'Portugiesisch',nld:'Niederländisch',rus:'Russisch',jpn:'Japanisch',zho:'Chinesisch',
+  kor:'Koreanisch',ara:'Arabisch',pol:'Polnisch',swe:'Schwedisch',dan:'Dänisch',
+  nor:'Norwegisch',fin:'Finnisch','cat':'Katalanisch',ces:'Tschechisch',rum:'Rumänisch',
+  hun:'Ungarisch',tur:'Türkisch',ukr:'Ukrainisch','ind': 'Indonesisch',tha:'Thailändisch',
+  vie:'Vietnamesisch','heb':'Hebräisch','hin':'Hindi','ell':'Griechisch','bul':'Bulgarisch',
+  hrv:'Kroatisch','slk':'Slowakisch','slv':'Slowenisch','lit':'Litauisch','lav':'Lettisch',
+  est:'Estnisch','glg':'Galizisch','epo':'Esperanto','lat':'Latein'};
+
+function resolveLang(code){ return langNames[code] || code; }
+function fmtSize(b){
+  if(!b) return '–';
+  const u=['B','KiB','MiB','GiB']; let i=0;
+  while(b>=1024&&i<u.length-1){b/=1024;i++}
+  return (b>=100?b.toFixed(0):b>=10?b.toFixed(1):b.toFixed(2))+' '+u[i];
+}
+function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function truncate(s,n=50){ return !s?'':(s.length>n?s.slice(0,n)+'…':s); }
+
+async function doSearch(reset=true){
+  if(searchLoading) return;
+  const input = document.getElementById('search-input');
+  const sel = document.getElementById('search-field');
+  const q = input.value.trim();
+  const field = sel.value;
+  if(!q){ document.getElementById('search-results').innerHTML=''; return; }
+  if(reset){ searchCursor=null; searchTotal=0; searchQuery=q; searchField=field; }
+  searchLoading=true;
+  document.getElementById('btn-search').disabled=true;
+  try{
+    const params = new URLSearchParams();
+    params.set(field, searchQuery);
+    params.set('limit', '20');
+    if(!reset && searchCursor) params.set('cursor', searchCursor);
+    const r = await fetch('/api/v1/search?'+params.toString());
+    if(!r.ok){
+      const e = await r.json().catch(()=>({}));
+      document.getElementById('search-results').innerHTML=
+        `<div class="err" style="margin-top:8px">${escapeHtml(e.detail||'Fehler bei der Suche')}</div>`;
+      return;
+    }
+    const data = await r.json();
+    searchTotal = data.totalLowerBound;
+    searchCursor = data.nextCursor;
+    renderSearchResults(data.results, reset);
+  }catch(e){
+    document.getElementById('search-results').innerHTML=
+      '<div class="err" style="margin-top:8px">Netzwerkfehler</div>';
+  }finally{
+    searchLoading=false;
+    document.getElementById('btn-search').disabled=false;
+  }
+}
+
+function renderSearchResults(results, reset){
+  const el = document.getElementById('search-results');
+  if(reset && (!results || !results.length)){
+    el.innerHTML='<div class="search-info">Keine Ergebnisse gefunden.</div>';
+    return;
+  }
+  if(!results || !results.length) return;
+  const label = fieldLabels[searchField]||searchField;
+  let html = '';
+  if(reset){
+    html+=`<div class="search-info">${label}: "<b>${escapeHtml(searchQuery)}</b>" – <b>${fmt(searchTotal)}</b> Treffer</div>`;
+    html+='<table><thead><tr><th>Titel</th><th>Autor(en)</th><th>Jahr</th><th>Format</th><th>Größe</th></tr></thead><tbody>';
+  } else {
+    html = el.querySelector('tbody') ? '' : '<table><thead><tr><th>Titel</th><th>Autor(en)</th><th>Jahr</th><th>Format</th><th>Größe</th></tr></thead><tbody>';
+  }
+  const tbody = reset ? null : el.querySelector('tbody');
+  const fragment = document.createDocumentFragment();
+  results.forEach(r=>{
+    const tr = document.createElement('tr');
+    const authors = (r.authors||[]).join('; ') || '–';
+    tr.innerHTML=`<td><span class="title-link" data-md5="${r.md5}">${escapeHtml(truncate(r.title,60))}</span></td>
+      <td class="small">${escapeHtml(truncate(authors,40))}</td>
+      <td class="num">${r.publicationYear||'–'}</td>
+      <td>${r.format||'–'}</td>
+      <td class="num small">${fmtSize(r.filesize)}</td>`;
+    tr.querySelector('.title-link').onclick = () => openDetail(r.md5);
+    fragment.appendChild(tr);
+  });
+  if(tbody){
+    tbody.appendChild(fragment);
+  } else {
+    html += '</tbody></table>';
+    el.innerHTML = html;
+    el.querySelector('tbody').appendChild(fragment);
+  }
+  // Load more button
+  let loadMore = el.querySelector('.load-more');
+  if(searchCursor){
+    if(!loadMore){
+      loadMore = document.createElement('div');
+      loadMore.className='load-more';
+      el.appendChild(loadMore);
+    }
+    loadMore.innerHTML=`<button id="btn-load-more">Mehr laden</button>`;
+    document.getElementById('btn-load-more').onclick=()=>doSearch(false);
+  } else if(loadMore){
+    loadMore.remove();
+  }
+}
+
+async function openDetail(md5){
+  const overlay = document.getElementById('modal-overlay');
+  const body = document.getElementById('modal-body');
+  overlay.classList.remove('hidden');
+  body.innerHTML='<div class="search-info">Lade Details…</div>';
+  try{
+    const r = await fetch('/api/v1/records/'+md5);
+    if(!r.ok){ body.innerHTML='<div class="err">Record nicht gefunden.</div>'; return; }
+    const rec = await r.json();
+    const idents = rec.identifiers||{};
+    const idRows = [
+      ['ISBN-13', (idents.isbn13||[]).join(', ')],
+      ['ISBN-10', (idents.isbn10||[]).join(', ')],
+      ['DOI', (idents.doi||[]).join(', ')],
+      ['OCLC', (idents.oclc||[]).join(', ')],
+      ['OpenLibrary', (idents.openlibrary||[]).join(', ')],
+    ].filter(([,v])=>v);
+    body.innerHTML=`
+      <div class="field"><div class="field-label">Titel</div><div class="field-value"><b>${escapeHtml(rec.title)}</b></div></div>
+      <div class="field"><div class="field-label">Autor(en)</div><div class="field-value">${escapeHtml((rec.authors||[]).join('; ')||'–')}</div></div>
+      <div class="field"><div class="field-label">Verlag</div><div class="field-value">${escapeHtml(rec.publisher||'–')}</div></div>
+      <div class="field"><div class="field-label">Erscheinungsjahr</div><div class="field-value">${rec.publicationYear||'–'}</div></div>
+      <div class="field"><div class="field-label">Sprache(n)</div><div class="field-value">${(rec.languages||[]).map(resolveLang).join(', ')||'–'}</div></div>
+      <div class="field"><div class="field-label">Format</div><div class="field-value">${rec.format||'–'}</div></div>
+      <div class="field"><div class="field-label">Dateigröße</div><div class="field-value">${fmtSize(rec.filesize)}</div></div>
+      ${rec.seriesName?`<div class="field"><div class="field-label">Reihe</div><div class="field-value">${escapeHtml(rec.seriesName)}${rec.seriesPosition?' #'+rec.seriesPosition:''}</div></div>`:''}
+      ${rec.edition?`<div class="field"><div class="field-label">Auflage</div><div class="field-value">${escapeHtml(rec.edition)}</div></div>`:''}
+      ${rec.editionCount&&rec.editionCount>1?`<div class="field"><div class="field-label">Auflagen</div><div class="field-value">${rec.editionCount} bekannte Auflagen · <a href="/api/v1/editions/${encodeURIComponent(rec.workKey)}" target="_blank" style="color:var(--accent)">API</a></div></div>`:''}
+      ${identsRows(idRows)}
+      <div class="field"><div class="field-label">Quelle</div><div class="field-value small">${escapeHtml(rec.source?.collection||'–')} ${rec.source?.record_id?'#'+escapeHtml(rec.source.record_id):''}</div></div>
+      <div class="field"><div class="field-label">MD5</div><div class="field-value mono">${rec.md5}</div></div>
+      <div class="field" style="margin-top:14px">
+        <a href="/api/v1/records/${rec.md5}" target="_blank" style="color:var(--accent);font-size:12px">JSON in neuem Tab öffnen ↗</a>
+      </div>`;
+  }catch(e){
+    body.innerHTML='<div class="err">Netzwerkfehler</div>';
+  }
+}
+
+function identsRows(idRows){
+  if(!idRows.length) return '';
+  return `<div class="field"><div class="field-label">Identifikatoren</div>
+    <div class="ident-grid">${idRows.map(([k,v])=>`<span class="ident-key">${k}</span><span class="mono">${escapeHtml(v)}</span>`).join('')}</div></div>`;
+}
+
+document.getElementById('btn-search').onclick = () => doSearch(true);
+document.getElementById('search-input').addEventListener('keydown', e => { if(e.key==='Enter') doSearch(true); });
+document.getElementById('modal-close').onclick = () => document.getElementById('modal-overlay').classList.add('hidden');
+document.getElementById('modal-overlay').addEventListener('click', e => {
+  if(e.target===document.getElementById('modal-overlay')) document.getElementById('modal-overlay').classList.add('hidden');
+});
 </script>
 </body>
 </html>

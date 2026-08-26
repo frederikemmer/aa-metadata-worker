@@ -23,13 +23,19 @@ def search(
     isbn: str | None = Query(default=None, max_length=20),
     doi: str | None = Query(default=None, max_length=100),
     language: str | None = Query(default=None, max_length=30),
+    series: str | None = Query(
+        default=None, max_length=MAX_QUERY_LENGTH, description="Series name filter"
+    ),
+    series_position: int | None = Query(
+        default=None, ge=1, le=9999, description="Series position (volume number)"
+    ),
     extension: str | None = Query(default=None, max_length=10),
     year_from: int | None = Query(default=None, ge=1000, le=2100),
     year_to: int | None = Query(default=None, ge=1000, le=2100),
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(default=None, max_length=256),
 ) -> SearchResponse:
-    if not any([q, title, author, isbn, doi, language, extension, year_from, year_to]):
+    if not any([q, title, author, isbn, doi, language, series, extension, year_from, year_to]):
         raise HTTPException(status_code=400, detail="At least one search parameter is required")
     if year_from and year_to and year_from > year_to:
         raise HTTPException(status_code=400, detail="year_from must be <= year_to")
@@ -42,6 +48,8 @@ def search(
             isbn=isbn,
             doi_param=doi,
             language=language,
+            series=series,
+            series_position=series_position,
             extension=extension,
             year_from=year_from,
             year_to=year_to,

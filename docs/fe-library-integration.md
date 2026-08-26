@@ -72,9 +72,10 @@ Authorization: Bearer <METADATA_API_KEY>
 
 | Zweck | Endpoint |
 |---|---|
-| Suche | `GET /api/v1/search?q=&title=&author=&isbn=&doi=&language=&extension=&year_from=&year_to=&limit=&cursor=` |
+| Suche | `GET /api/v1/search?q=&title=&author=&isbn=&doi=&language=&series=&series_position=&extension=&year_from=&year_to=&limit=&cursor=` |
 | Record-Detail | `GET /api/v1/records/{md5}` |
 | Quellen-Referenzen | `GET /api/v1/records/{md5}/sources` |
+| Alle Editionen | `GET /api/v1/editions/{work_key}` |
 | Verfügbarkeit | `GET /api/v1/status` |
 | Health | `GET /api/v1/health/live` · `/health/ready` |
 
@@ -100,7 +101,11 @@ Authorization: Bearer <METADATA_API_KEY>
         "oclc": [], "openlibrary": []
       },
       "workKey": "isbn:9783161484100",      // logische Werk-ID zum Gruppieren
-      "source": {"collection": "zlib3_records", "record_id": "22433983", "aacid": "aacid__…"}
+      "seriesName": "Wicked Games",         // Reihenname
+      "seriesPosition": 1,                  // Bandnummer
+      "edition": "Special Edition",         // Auflage
+      "source": {"collection": "zlib3_records", "record_id": "22433983", "aacid": "aacid__…"},
+      "editionCount": 3                     // Anzahl verfügbarer Versionen
     }
   ]
 }
@@ -168,6 +173,9 @@ class MetadataRecord:
     filesize: Optional[int] = None
     isbn13: list[str] = field(default_factory=list)
     work_key: Optional[str] = None
+    series_name: Optional[str] = None
+    series_position: Optional[int] = None
+    edition: Optional[str] = None
 
 
 class MetadataApiClient:
@@ -190,6 +198,8 @@ class MetadataApiClient:
         author: Optional[str] = None,
         isbn: Optional[str] = None,
         language: Optional[str] = None,
+        series: Optional[str] = None,
+        series_position: Optional[int] = None,
         extension: Optional[str] = None,
         year_from: Optional[int] = None,
         limit: int = 20,
@@ -205,6 +215,10 @@ class MetadataApiClient:
         if language:
             # FE.Library ISO-639-3 values are accepted directly.
             params["language"] = language
+        if series:
+            params["series"] = series
+        if series_position is not None:
+            params["series_position"] = series_position
         if extension:
             params["extension"] = extension
         if year_from:
@@ -232,7 +246,36 @@ class MetadataApiClient:
             filesize=body["filesize"],
             isbn13=body["identifiers"]["isbn13"],
             work_key=body["workKey"],
+            series_name=body.get("seriesName"),
+            series_position=body.get("seriesPosition"),
+            edition=body.get("edition"),
         )
+
+    def editions(self, work_key: str) -> list[MetadataRecord]:
+        """Return all editions of a work, sorted by quality score (best first)."""
+        response = self._client.get(f"/api/v1/editions/{work_key}")
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        body = response.json()
+        return [
+            MetadataRecord(
+                md5=ed["md5"],
+                title=ed["title"],
+                authors=ed["authors"],
+                publisher=ed.get("publisher"),
+                publication_year=ed.get("publicationYear"),
+                languages=ed.get("languages", []),
+                format=ed.get("format"),
+                filesize=ed.get("filesize"),
+                isbn13=ed.get("identifiers", {}).get("isbn13", []),
+                work_key=ed.get("workKey"),
+                series_name=ed.get("seriesName"),
+                series_position=ed.get("seriesPosition"),
+                edition=ed.get("edition"),
+            )
+            for ed in body.get("editions", [])
+        ]
 
     def close(self) -> None:
         self._client.close()

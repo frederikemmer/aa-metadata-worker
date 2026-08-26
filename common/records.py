@@ -24,6 +24,9 @@ WEIGHTS = {
     "openlibrary_ids": 2,
     "extension": 1,
     "filesize": 1,
+    "series_name": 2,
+    "series_position": 1,
+    "edition": 1,
 }
 
 
@@ -43,6 +46,10 @@ class NormalizedRecord:
     doi: list[str] = field(default_factory=list)
     oclc: list[str] = field(default_factory=list)
     openlibrary_ids: list[str] = field(default_factory=list)
+
+    series_name: str | None = None
+    series_position: int | None = None
+    edition: str | None = None
 
     source_collection: str = ""
     source_record_id: str | None = None
@@ -87,6 +94,12 @@ def quality_score(record: NormalizedRecord) -> int:
         score += WEIGHTS["extension"]
     if record.filesize:
         score += WEIGHTS["filesize"]
+    if record.series_name:
+        score += WEIGHTS["series_name"]
+    if record.series_position is not None:
+        score += WEIGHTS["series_position"]
+    if record.edition:
+        score += WEIGHTS["edition"]
     return score
 
 
@@ -134,6 +147,9 @@ def merge_records(
         languages=_merge_arrays(existing.languages, incoming.languages),
         extension=prefer_scalar(existing.extension, incoming.extension),  # type: ignore[arg-type]
         filesize=prefer_scalar(existing.filesize, incoming.filesize),  # type: ignore[arg-type]
+        series_name=prefer_scalar(existing.series_name, incoming.series_name),  # type: ignore[arg-type]
+        series_position=prefer_scalar(existing.series_position, incoming.series_position),  # type: ignore[arg-type]
+        edition=prefer_scalar(existing.edition, incoming.edition),  # type: ignore[arg-type]
         isbn13=_merge_arrays(existing.isbn13, incoming.isbn13),
         isbn10=_merge_arrays(existing.isbn10, incoming.isbn10),
         doi=_merge_arrays(existing.doi, incoming.doi),

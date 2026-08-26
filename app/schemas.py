@@ -30,7 +30,17 @@ class RecordResponse(BaseModel):
     filesize: int | None = None
     identifiers: Identifiers = Field(default_factory=Identifiers)
     workKey: str | None = None
+    seriesName: str | None = None
+    seriesPosition: int | None = None
+    edition: str | None = None
     source: SourceInfo
+    editionCount: int | None = None
+
+
+class EditionResponse(BaseModel):
+    workKey: str
+    totalEditions: int
+    editions: list[RecordResponse] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):

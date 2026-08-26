@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.routes import control, dashboard, health, records, search
+from app.routes import control, dashboard, editions, health, records, search
 from app.routes import status as status_routes
 from common.config import load_settings
 from common.db import apply_migrations, close_pool, connect, get_pool
@@ -101,6 +101,7 @@ def create_app() -> FastAPI:
     app.include_router(control.router)
     app.include_router(search.router)
     app.include_router(records.router)
+    app.include_router(editions.router)
     app.include_router(dashboard.router)
 
     @app.middleware("http")
@@ -115,6 +116,7 @@ def create_app() -> FastAPI:
             path.startswith("/api/v1/health")
             or path == "/api/v1/sync/status"  # read-only progress data for the dashboard
             or path == "/api/v1/sync/control"  # read-only control state for the dashboard
+            or path == "/api/v1/search"  # read-only search for the dashboard
             or path in ("/", "/dashboard", "/openapi.json", "/docs", "/redoc")
             or path.startswith("/docs/")
         )

@@ -60,6 +60,16 @@ class Zlib3Adapter(SourceAdapter):
         except (TypeError, ValueError):
             filesize = None
 
+        series = _scalar_text(meta.get("series")) or None
+        volume_raw = meta.get("volume")
+        volume = None
+        if volume_raw is not None:
+            try:
+                volume = int(volume_raw)
+            except (TypeError, ValueError):
+                volume = None
+        edition = _scalar_text(meta.get("edition")) or None
+
         record = NormalizedRecord(
             md5=md5,
             title=_scalar_text(meta.get("title")),
@@ -71,6 +81,9 @@ class Zlib3Adapter(SourceAdapter):
             filesize=filesize,
             isbn13=isbn13,
             isbn10=isbn10,
+            series_name=series,
+            series_position=volume,
+            edition=edition,
             source_collection=self.collection,
             source_record_id=str(meta.get("zlibrary_id")) if meta.get("zlibrary_id") else None,
             aacid=raw.get("aacid"),
