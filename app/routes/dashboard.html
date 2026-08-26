@@ -72,7 +72,7 @@
 </section>
 
 <section class="card">
-  <h2>Aktueller Sync</h2>
+  <h2>Aktive Downloads &amp; Imports</h2>
   <div id="active"><div class="idle">Kein Sync aktiv.</div></div>
 </section>
 
@@ -133,20 +133,26 @@ async function checkLatestRelease(){
     if (r.ok){ latestSha = (await r.json()).sha; renderVersion(); }
   }catch(e){ /* offline / rate-limited: keep version without badge */ }
 }
-let dlSamples = [], dlKey = null;
+let dlTrackers = {};   // key -> sliding-window samples, one per running download
 
 // Sliding-window download rate (the DB progress counter only updates in
 // intervals, so a short client-side average gives a stable speed + ETA).
+// Tracks EACH downloading collection independently (parallel downloads).
 function trackDownload(a){
-  const key = a.collection+'/'+a.releaseIdentifier;
-  const last = dlSamples[dlSamples.length-1];
-  if (key !== dlKey || (last && a.downloadDoneBytes < last.done)){
-    dlKey = key; dlSamples = [];
-  }
+  const key = a.collection+'/'+(a.releaseIdentifier||'');
   const now = Date.now();
-  dlSamples.push({t: now, done: a.downloadDoneBytes});
-  while (dlSamples.length > 1 && now - dlSamples[0].t > 300000) dlSamples.shift();
-  const first = dlSamples[0];
+  let samples = dlTrackers[key];
+  if (!samples || (samples.length && a.downloadDoneBytes < samples[samples.length-1].done)){
+    samples = []; dlTrackers[key] = samples;
+  }
+  // Drop stale trackers (no update for >30 min) to keep memory bounded.
+  for (const k of Object.keys(dlTrackers)){
+    const s = dlTrackers[k];
+    if (s.length && now - s[s.length-1].t > 1800000) delete dlTrackers[k];
+  }
+  samples.push({t: now, done: a.downloadDoneBytes});
+  while (samples.length > 1 && now - samples[0].t > 300000) samples.shift();
+  const first = samples[0];
   const spanS = (now - first.t)/1000;
   let line;
   if (spanS >= 15){
@@ -236,28 +242,35 @@ function render(d){
     <div class="card"><h2>Status</h2><div class="big">${d.ready?'Bereit':'Initialisiere'}</div>
       <div class="small">Schema v${d.schemaVersion}${d.records===0&&!d.activeSync?' · Bootstrap noch nicht ausgeführt':''}</div></div>`;
 
-  const a = d.activeSync;
+  // Alle aktiven Downloads/Imports – bei Parallel-Downloads mehrere Blöcke.
+  const actives = d.collections.filter(c =>
+    ['downloading','importing','validating'].includes(c.status));
   const el = document.getElementById('active');
-  if(!a){ el.innerHTML = '<div class="idle">Kein Sync aktiv – nächster Lauf nach Zeitplan (siehe Steuerung).</div>'; }
-  else {
-    let bar='';
-    if(a.status==='downloading' && a.downloadTotalBytes>0){
-      const p=Math.min(100,a.downloadDoneBytes/a.downloadTotalBytes*100);
-      bar=`<div class="bar"><div style="width:${p}%"></div></div>
-           <div class="small">Download: ${gib(a.downloadDoneBytes)} / ${gib(a.downloadTotalBytes)} (${p.toFixed(1)}%)</div>
-           ${trackDownload(a)}`;
-    }
-    el.innerHTML = `<div>${pill(a.status)} <b>${a.collection}</b>
-        <span class="small">${trunc(a.releaseIdentifier,64)}</span></div>${bar}
-      <div class="counters">
-        <span>Gesehen <b>${fmt(a.recordsSeen)}</b></span>
-        <span>Neu <b>${fmt(a.recordsInserted)}</b></span>
-        <span>Aktualisiert <b>${fmt(a.recordsUpdated)}</b></span>
-        <span>Übersprungen <b>${fmt(a.recordsSkipped)}</b></span>
-        <span>Verworfen <b>${fmt(a.recordsDiscarded)}</b></span>
-        <span>Fehler <b>${fmt(a.recordsFailed)}</b></span>
-        <span>Start <b>${a.startedAt||'–'}</b></span></div>
-      ${a.errorMessage?`<div class="err">${a.errorMessage}</div>`:''}`;
+  if(!actives.length){
+    el.innerHTML = '<div class="idle">Kein Sync aktiv – nächster Lauf nach Zeitplan (siehe Steuerung).</div>';
+  } else {
+    el.innerHTML = actives.map(a=>{
+      let bar='';
+      if(a.downloadTotalBytes>0){
+        const p=Math.min(100,a.downloadDoneBytes/a.downloadTotalBytes*100);
+        bar=`<div class="bar"><div style="width:${p}%"></div></div>
+             <div class="small">Download: ${gib(a.downloadDoneBytes)} / ${gib(a.downloadTotalBytes)} (${p.toFixed(1)}%)</div>
+             ${a.status==='downloading'?trackDownload(a):''}`;
+      }
+      return `<div style="padding:10px 0;border-bottom:1px solid var(--line)">
+        <div>${pill(a.status)} <b>${a.collection}</b>
+            <span class="small">${trunc(a.releaseIdentifier,64)}</span></div>${bar}
+        <div class="counters">
+          <span>Gesehen <b>${fmt(a.recordsSeen)}</b></span>
+          <span>Neu <b>${fmt(a.recordsInserted)}</b></span>
+          <span>Aktualisiert <b>${fmt(a.recordsUpdated)}</b></span>
+          <span>Übersprungen <b>${fmt(a.recordsSkipped)}</b></span>
+          <span>Verworfen <b>${fmt(a.recordsDiscarded)}</b></span>
+          <span>Fehler <b>${fmt(a.recordsFailed)}</b></span>
+          <span>Start <b>${a.startedAt||'–'}</b></span></div>
+        ${a.errorMessage?`<div class="err">${a.errorMessage}</div>`:''}
+      </div>`;
+    }).join('');
   }
 
   document.querySelector('#colls tbody').innerHTML = d.collections.map(c=>`
