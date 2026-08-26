@@ -147,6 +147,13 @@ class ImportStats:
     error_samples: list[str] = field(default_factory=list)
 
 
+def _strip_nul(value: str | None) -> str | None:
+    """Remove NUL (0x00) bytes — PostgreSQL text columns reject them."""
+    if value is None:
+        return None
+    return value.replace("\x00", "") if "\x00" in value else value
+
+
 def record_to_params(record: NormalizedRecord) -> dict:
     """NormalizedRecord -> DB row dict incl. derived normalized columns."""
     title_norm = normalize_text(record.title)
@@ -158,13 +165,13 @@ def record_to_params(record: NormalizedRecord) -> dict:
                 author_tokens.append(token)
     return {
         "md5": record.md5,
-        "title": record.title or "",
-        "title_norm": title_norm,
-        "authors": [a for a in record.authors if a],
+        "title": _strip_nul(record.title) or "",
+        "title_norm": _strip_nul(title_norm),
+        "authors": [_strip_nul(a) for a in record.authors if a],
         "author_tokens": author_tokens,
-        "publisher": record.publisher,
+        "publisher": _strip_nul(record.publisher),
         "publication_year": record.publication_year,
-        "languages": record.languages,
+        "languages": [_strip_nul(lang) for lang in record.languages],
         "extension": record.extension,
         "filesize": record.filesize,
         "isbn10": record.isbn10,
@@ -173,9 +180,9 @@ def record_to_params(record: NormalizedRecord) -> dict:
         "oclc": record.oclc,
         "openlibrary_ids": record.openlibrary_ids,
         "work_key": derive_work_key(record.isbn13, record.isbn10, record.doi, record.openlibrary_ids),
-        "series_name": record.series_name,
+        "series_name": _strip_nul(record.series_name),
         "series_position": record.series_position,
-        "edition": record.edition,
+        "edition": _strip_nul(record.edition),
         "source_collection": record.source_collection,
         "source_record_id": record.source_record_id,
         "aacid": record.aacid,
