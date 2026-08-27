@@ -302,9 +302,11 @@ def cmd_purge_sources(args: argparse.Namespace) -> int:
         )
         for table, copy_sql in backup_specs:
             backup_path = backup_dir / f"{table}_purged_{stamp}.bin.gz"
-            # Level 1 keeps the safety backup compressed without making a
-            # multi-million-row maintenance run CPU-bound for hours.
-            with gzip.open(backup_path, "wb", compresslevel=1) as out:
+            # Keep gzip framing for integrity/restore tooling, but store the
+            # PostgreSQL binary stream without Deflate compression. For tens
+            # of millions of rows compression would otherwise hold the
+            # maintenance transaction open for hours on a single CPU core.
+            with gzip.open(backup_path, "wb", compresslevel=0) as out:
                 with conn.cursor().copy(copy_sql, params=(keep,)) as copy:
                     while chunk := copy.read():
                         out.write(chunk)
