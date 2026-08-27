@@ -183,6 +183,23 @@ def normalize_year(value) -> int | None:
     return year if 1000 <= year <= 2100 else None
 
 
+def normalize_series_position(value) -> int | None:
+    """Return a plausible series position (1..32767) or None.
+
+    Derived positions are stored in a SMALLINT column; garbage values (e.g. a
+    Zlib export reporting "volume": 4xxxxxx) would raise a NumericValueOutOfRange
+    and abort the whole batch upsert. Clamp to the positive SMALLINT range and
+    reject anything outside it instead of failing the import.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        pos = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pos if 1 <= pos <= 32767 else None
+
+
 def split_authors(value: str | None) -> list[str]:
     """Split common author field conventions into a clean author list.
 

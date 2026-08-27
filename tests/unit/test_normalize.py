@@ -11,6 +11,7 @@ from common.normalize import (
     normalize_isbn_list,
     normalize_language,
     normalize_md5,
+    normalize_series_position,
     normalize_text,
     normalize_year,
     split_authors,
@@ -183,3 +184,25 @@ class TestWorkKey:
         assert derive_work_key([], [], ["10.1000/182"], ["OL1M"]) == "doi:10.1000/182"
         assert derive_work_key([], [], [], ["OL1M"]) == "ol:OL1M"
         assert derive_work_key([], [], [], []) is None
+
+
+class TestSeriesPosition:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (5, 5),
+            ("12", 12),
+            ("001", 1),
+            (32767, 32767),
+            # Out of SMALLINT range -> reject so we never overflow the column.
+            (32768, None),
+            (55000, None),
+            (-3, None),
+            (0, None),
+            ("abc", None),
+            ("", None),
+            (None, None),
+        ],
+    )
+    def test_variants(self, raw, expected):
+        assert normalize_series_position(raw) == expected

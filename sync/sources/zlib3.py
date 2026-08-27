@@ -16,6 +16,7 @@ from common.normalize import (
     normalize_isbn_list,
     normalize_language,
     normalize_md5,
+    normalize_series_position,
     normalize_text,
     normalize_year,
     split_authors,
@@ -61,13 +62,7 @@ class Zlib3Adapter(SourceAdapter):
             filesize = None
 
         series = _scalar_text(meta.get("series")) or None
-        volume_raw = meta.get("volume")
-        volume = None
-        if volume_raw is not None:
-            try:
-                volume = int(volume_raw)
-            except (TypeError, ValueError):
-                volume = None
+        volume = normalize_series_position(meta.get("volume"))
         edition = _scalar_text(meta.get("edition")) or None
 
         record = NormalizedRecord(

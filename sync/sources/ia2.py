@@ -27,6 +27,7 @@ from common.normalize import (
     normalize_isbn_list,
     normalize_language,
     normalize_md5,
+    normalize_series_position,
     normalize_year,
     split_authors,
 )
@@ -103,13 +104,7 @@ class Ia2Adapter(SourceAdapter):
         year = normalize_year(ia_meta.get("date"))
 
         series_name = _as_text(ia_meta.get("series")) or None
-        series_pos_raw = ia_meta.get("volume")
-        series_position = None
-        if series_pos_raw is not None:
-            try:
-                series_position = int(str(series_pos_raw).strip())
-            except (TypeError, ValueError):
-                pass
+        series_position = normalize_series_position(ia_meta.get("volume"))
         edition = _as_text(ia_meta.get("edition")) or None
 
         records: list[NormalizedRecord] = []
