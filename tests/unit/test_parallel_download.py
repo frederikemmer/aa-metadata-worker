@@ -21,7 +21,7 @@ class TestDownloadOne:
         payload = Path("/work/sync/identifier.jsonl.seekable.zst")
         mock_client.download.return_value = payload
 
-        coll, result, error = _download_one(
+        coll, result, error, is_partial = _download_one(
             "zlib3_records",
             "annas_archive_meta__aacid__zlib3_records__x.jsonl.seekable.zst",
             "https://example.com/t.torrent",
@@ -34,6 +34,7 @@ class TestDownloadOne:
         assert coll == "zlib3_records"
         assert result == payload
         assert error is None
+        assert is_partial is False
         mock_client.download.assert_called_once()
         mock_client.close.assert_called_once()
         mock_conn.close.assert_called_once()
@@ -46,7 +47,7 @@ class TestDownloadOne:
         mock_client_cls.return_value = mock_client
         mock_client.download.side_effect = RuntimeError("stalled")
 
-        coll, result, error = _download_one(
+        coll, result, error, is_partial = _download_one(
             "zlib3_records",
             "id",
             "url",
@@ -60,7 +61,36 @@ class TestDownloadOne:
         assert result is None
         assert isinstance(error, RuntimeError)
         assert "stalled" in str(error)
+        assert is_partial is False
         mock_client.close.assert_called_once()
+
+    @patch("sync.run.connect")
+    @patch("sync.run.TorrentClient")
+    def test_partial_download_returns_partial_path(self, mock_client_cls, mock_connect):
+        """A stalled download with usable partial data is reported for a
+        resilient import instead of being discarded."""
+        from sync.torrent_client import PartialDownloadError
+
+        mock_connect.return_value = MagicMock()
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        partial = Path("/work/sync/partial.jsonl.seekable.zst")
+        mock_client.download.side_effect = PartialDownloadError("stalled", partial)
+
+        coll, result, error, is_partial = _download_one(
+            "zlib3_records",
+            "id",
+            "url",
+            "magnet",
+            1,
+            Path("/work/sync"),
+            MagicMock(sync_reuse_prev_payload=False),
+        )
+
+        assert coll == "zlib3_records"
+        assert result == partial
+        assert error is None
+        assert is_partial is True
 
     @patch("sync.run.connect")
     @patch("sync.run.TorrentClient")

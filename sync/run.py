@@ -32,7 +32,7 @@ from sync.importer import (
     validate_import,
 )
 from sync.storage_guard import GIB, evaluate_storage
-from sync.torrent_client import TorrentClient
+from sync.torrent_client import PartialDownloadError, TorrentClient
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +87,13 @@ def _download_one(
     work_dir: Path,
     settings: Settings,
     listen_port: int = 6881,
-) -> tuple[str, Path | None, Exception | None]:
+) -> tuple[str, Path | None, Exception | None, bool]:
     """Download a single collection in its own thread.
 
-    Returns (collection, payload_path, error).  Each thread creates its own
-    TorrentClient (libtorrent session) and DB connection for thread safety.
+    Returns (collection, payload_path, error, is_partial).  `is_partial` is
+    True when the download stalled but partial payload data exists and should
+    be imported resiliently.  Each thread creates its own TorrentClient
+    (libtorrent session) and DB connection for thread safety.
     """
     conn: psycopg.Connection | None = None
     client: TorrentClient | None = None
@@ -115,9 +117,11 @@ def _download_one(
             on_progress=on_progress,
             seed_base=seed_base,
         )
-        return collection, payload_path, None
+        return collection, payload_path, None, False
+    except PartialDownloadError as error:  # stalled but data on disk
+        return collection, error.path, None, True
     except Exception as error:  # noqa: BLE001 - catch everything for worker
-        return collection, None, error
+        return collection, None, error, False
     finally:
         if client is not None:
             client.close()
@@ -139,11 +143,16 @@ def _import_payload(
     work_dir: Path,
     settings: Settings,
     summary: SyncRunSummary,
+    resilient: bool = False,
 ) -> None:
     """Import one downloaded payload and finalize its release row.
 
     Called as soon as an individual download finishes so that finished
     collections do not wait for slower/stalled torrents.
+
+    `resilient` is set when the payload is a partial download (some pieces
+    missing/corrupt).  In that case the importer skips the broken frames and
+    imports every decompressible record instead of failing the whole release.
     """
     release_id = info["release_id"]
     release = info["release"]
@@ -160,9 +169,14 @@ def _import_payload(
         )
         logger.info("%s", decision.message)
 
-        stats = import_release(conn, collection, payload_path, release_id, settings)
+        stats = import_release(
+            conn, collection, payload_path, release_id, settings, resilient=resilient
+        )
         validate_import(conn, release_id, stats)
-        state.set_release_status(conn, release_id, "completed")
+        status_note = " (partial — some pieces missing)" if resilient else ""
+        state.set_release_status(
+            conn, release_id, "completed", f"imported{status_note}"
+        )
         state.update_download_progress(
             conn, release_id, payload_path.stat().st_size, payload_path.stat().st_size
         )
@@ -243,6 +257,21 @@ def _download_sequential(
                 )
                 _import_payload(
                     conn, collection, payload_path, info, work_dir, settings, summary
+                )
+            except PartialDownloadError as error:
+                logger.warning(
+                    "[%s] Partial download; importing available data resiliently.",
+                    collection,
+                )
+                _import_payload(
+                    conn,
+                    collection,
+                    error.path,
+                    info,
+                    work_dir,
+                    settings,
+                    summary,
+                    resilient=True,
                 )
             except GracefulShutdown:
                 raise
@@ -383,7 +412,7 @@ def run_sync(
                     for future in as_completed(futures):
                         collection = futures[future]
                         release_id = to_download[collection]["release_id"]
-                        _coll, payload, error = future.result()
+                        _coll, payload, error, is_partial = future.result()
                         if error is not None:
                             conn.rollback()
                             state.set_release_status(
@@ -396,7 +425,11 @@ def run_sync(
                             summary.failed.append((collection, f"{error}"))
                             delete_payload(work_dir / to_download[collection]["release"].identifier)
                         else:
-                            logger.info("[%s] Download complete; starting import.", collection)
+                            logger.info(
+                                "[%s] Download %s; starting import.",
+                                collection,
+                                "partial (resilient)" if is_partial else "complete",
+                            )
                             _import_payload(
                                 conn,
                                 collection,
@@ -405,6 +438,7 @@ def run_sync(
                                 work_dir,
                                 settings,
                                 summary,
+                                resilient=is_partial,
                             )
             else:
                 logger.info("Downloading %d collections sequentially.", len(to_download))

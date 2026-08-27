@@ -212,12 +212,89 @@ class _CountingFile:
         return getattr(self._file, name)
 
 
-def iter_jsonl(payload_path: Path, on_bytes=None):
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def _iter_jsonl_frames(payload_path: Path, on_bytes=None):
+    """Decompress a .seekable.zst file frame-by-frame, skipping corrupt frames.
+
+    Used for resilient (partial) imports.  A partial BitTorrent download may be
+    missing pieces anywhere in the file (libtorrent fills missing pieces with
+    zero bytes), so some zstd frames cannot be decoded.  Rather than feeding
+    garbage into the record parser, each independent zstd frame is decoded on
+    its own; frames that fail to decompress are skipped and the next boundary
+    is found by scanning for the frame magic.  This keeps the error rate near
+    zero so `sync_error_abort_rate` does not abort the run.
+    """
+    decompressor = zstandard.ZstdDecompressor(max_window_size=2**27)
+    read_chunk = 1 << 20  # 1 MiB
+    total = payload_path.stat().st_size
+    with open(payload_path, "rb") as raw_file:
+        pos = 0
+        while pos < total and pos >= 0:
+            # Find the next frame magic by scanning forward.
+            raw_file.seek(pos)
+            scan = raw_file.read(min(total - pos, read_chunk))
+            if not scan:
+                break
+            frame_start = scan.find(_ZSTD_MAGIC)
+            if frame_start < 0:
+                pos += len(scan)
+                continue
+            abs_start = pos + frame_start
+
+            # Incrementally decompress this frame with bounded memory, feeding
+            # chunks until libtorrent's decompressor reports `eof`.
+            dobj = decompressor.decompressobj()
+            out_bufs: list[bytes] = []
+            feed = abs_start
+            consumed = 0
+            frame_eof = False
+            while feed < total:
+                raw_file.seek(feed)
+                chunk = raw_file.read(min(total - feed, read_chunk))
+                if not chunk:
+                    break
+                try:
+                    out = dobj.decompress(chunk)
+                except Exception:  # noqa: BLE001 - corrupt frame: skip it
+                    frame_eof = False
+                    break
+                out_bufs.append(out)
+                if dobj.eof:
+                    used_in_final = len(chunk) - len(dobj.unused_data)
+                    consumed = (feed - abs_start) + used_in_final
+                    frame_eof = True
+                    break
+                feed += len(chunk)
+
+            if not frame_eof:
+                # Undecodable frame: skip past its magic and try the next one.
+                pos = abs_start + 1
+                continue
+            if on_bytes is not None:
+                on_bytes(abs_start + consumed)
+            text = b"".join(out_bufs).decode("utf-8", errors="replace")
+            for line in text.splitlines():
+                line = line.strip()
+                if line:
+                    yield line
+            pos = abs_start + consumed
+
+
+def iter_jsonl(payload_path: Path, on_bytes=None, resilient: bool = False):
     """Stream-decompress a .jsonl(.seekable).zst file line by line.
 
     `on_bytes(compressed_bytes_read)` is invoked after every chunk pulled from
     the underlying file (used for live import-progress reporting).
+
+    When `resilient` is True, a .seekable.zst payload with missing/corrupt
+    pieces is still imported: each independent frame is decoded separately and
+    undecodable frames are skipped (see `_iter_jsonl_frames`).
     """
+    if resilient:
+        yield from _iter_jsonl_frames(payload_path, on_bytes=on_bytes)
+        return
     with open(payload_path, "rb") as raw_file:
         counting = _CountingFile(raw_file)
         decompressor = zstandard.ZstdDecompressor(max_window_size=2**27)
@@ -250,8 +327,14 @@ def import_release(
     payload_path: Path,
     release_id: int,
     settings: Settings | None = None,
+    resilient: bool = False,
 ) -> ImportStats:
-    """Import one release payload with per-batch commits and error-rate abort."""
+    """Import one release payload with per-batch commits and error-rate abort.
+
+    When `resilient` is True the payload is imported even if it is a partial
+    download: the `.seekable.zst` is decoded frame-by-frame and any undecodable
+    (missing-piece) frames are skipped instead of aborting the whole release.
+    """
     settings = settings or load_settings()
     adapter = get_adapter(collection)
     stats = ImportStats()
@@ -299,7 +382,7 @@ def import_release(
 
     state.update_import_progress(conn, release_id, 0, total_bytes)
 
-    for line in iter_jsonl(payload_path, on_bytes=on_bytes):
+    for line in iter_jsonl(payload_path, on_bytes=on_bytes, resilient=resilient):
         if _shutdown_requested:
             flush()
             raise GracefulShutdown("SIGTERM received during import")

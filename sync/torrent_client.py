@@ -39,6 +39,19 @@ class TorrentDownloadError(RuntimeError):
     pass
 
 
+class PartialDownloadError(TorrentDownloadError):
+    """Raised when a download stalls but partial payload data exists on disk.
+
+    The payload is incomplete (missing/corrupt pieces), but callers may still
+    import the decompressible prefix/frames instead of discarding everything.
+    `path` points at the partial payload file.
+    """
+
+    def __init__(self, message: str, path: Path):
+        super().__init__(message)
+        self.path = path
+
+
 def _adaptive_stall_timeout(progress: float, base: float = 900.0) -> float:
     """Return a stall timeout that scales up as the download nears completion.
 
@@ -147,9 +160,12 @@ class TorrentClient:
         last_log = 0.0
         last_progress_change = time.monotonic()
         last_total_done = -1
+        last_check_start = time.monotonic()
         last_callback = 0.0
         last_reannounce = 0.0
         announce_interval = 300  # re-announce every 5 min while stalled
+        peerless_since = None  # monotonic time when we became peer-less at 0%
+        last_peerless_log = 0.0
 
         while True:
             status = handle.status()
@@ -158,6 +174,9 @@ class TorrentClient:
 
             now = time.monotonic()
             # While checking existing data, verification progress counts as activity.
+            # BUT only for a bounded window: if libtorrent is stuck in a checking
+            # state (e.g. constant re-check of a partial seed base), we must still
+            # time out.  Cap the "checking counts as activity" grace to 10 min.
             checking = (
                 str(status.state)
                 in (
@@ -170,8 +189,14 @@ class TorrentClient:
             if total_done != last_total_done:
                 last_total_done = total_done
                 last_progress_change = now
+                last_check_start = now
             elif checking:
-                last_progress_change = now
+                # Only treat re-checking as activity for the first 10 minutes.
+                # After that, a stuck check must not bypass the stall timeout.
+                if now - last_check_start > 600:
+                    pass  # do not reset last_progress_change — let stall fire
+                else:
+                    last_progress_change = now
 
             if on_progress is not None and now - last_callback >= 1.0:
                 last_callback = now
@@ -190,6 +215,26 @@ class TorrentClient:
                     status.num_seeds,
                     status.download_payload_rate / 1024,
                 )
+
+            # Peer-less diagnosis: stuck at 0% with no peers means the torrent
+            # simply has no (reachable) seeders — report it clearly instead of
+            # silently hanging forever, so the operator knows it is a seeding
+            # availability problem rather than a code bug.
+            if progress == 0.0 and status.num_peers == 0:
+                if peerless_since is None:
+                    peerless_since = now
+                elif now - peerless_since > 600 and now - last_peerless_log >= 300:
+                    last_peerless_log = now
+                    logger.warning(
+                        "[%s] No peers/seeds found for %.0f min at 0%% — "
+                        "torrent may be poorly seeded; keeping active in case "
+                        "seeders appear. (DHT enabled, re-announcing.)",
+                        release_identifier[:40],
+                        (now - peerless_since) / 60,
+                    )
+            else:
+                peerless_since = None
+                last_peerless_log = 0.0
 
             if status.is_seeding or progress >= 1.0:
                 break
@@ -313,6 +358,12 @@ class TorrentClient:
                     pass
                 # If we already had a partial file and this is a retry, the
                 # previous error is more informative.
+                if target_path.exists() and target_path.stat().st_size > 0:
+                    raise PartialDownloadError(
+                        f"Download stalled; importing available partial data "
+                        f"({target_path.stat().st_size} bytes). Last error: {error}",
+                        target_path,
+                    ) from last_error
                 raise error from last_error
             except Exception as error:  # noqa: BLE001
                 try:
@@ -321,8 +372,14 @@ class TorrentClient:
                     pass
                 raise TorrentDownloadError(str(error)) from error
         elif handle is None:
-            # No magnet link available — raise the original error.
+            # No magnet link available — raise the original error (or a partial one).
             if last_error is not None:
+                if target_path.exists() and target_path.stat().st_size > 0:
+                    raise PartialDownloadError(
+                        f"Download stalled; importing available partial data "
+                        f"({target_path.stat().st_size} bytes). Last error: {last_error}",
+                        target_path,
+                    )
                 raise last_error
             raise TorrentDownloadError("Neither torrent URL nor magnet link provided")
 
