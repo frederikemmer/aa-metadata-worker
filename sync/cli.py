@@ -302,7 +302,9 @@ def cmd_purge_sources(args: argparse.Namespace) -> int:
         )
         for table, copy_sql in backup_specs:
             backup_path = backup_dir / f"{table}_purged_{stamp}.bin.gz"
-            with gzip.open(backup_path, "wb") as out:
+            # Level 1 keeps the safety backup compressed without making a
+            # multi-million-row maintenance run CPU-bound for hours.
+            with gzip.open(backup_path, "wb", compresslevel=1) as out:
                 with conn.cursor().copy(copy_sql, params=(keep,)) as copy:
                     while chunk := copy.read():
                         out.write(chunk)
