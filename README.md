@@ -98,7 +98,8 @@ Containername erreicht.
 
 ### Fortschritt im Browser (ohne Docker-CLI)
 
-**`http://<server-ip>:8010/dashboard`** zeigt live (2-s-Poll):
+**`http://<server-ip>:8010/dashboard`** zeigt live (2 s während eines Syncs,
+10 s im Leerlauf und reduziert bei inaktivem Browser-Tab):
 
 * aktiver Sync: Phase (Download/Import/Validierung), Fortschrittsbalken,
   Zähler (gesehen/neu/aktualisiert/übersprungen/verworfen/Fehler)

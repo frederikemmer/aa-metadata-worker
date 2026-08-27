@@ -99,6 +99,8 @@ class TestDashboardHtml:
         html = response.text
         assert "AA Metadata Worker" in html
         assert "/api/v1/sync/status" in html  # the page polls this endpoint
+        assert "setInterval(tick" not in html  # slow requests must never overlap
+        assert "Status wird geladen" in html
 
     def test_dashboard_exempt_from_auth(self, db_conn, monkeypatch):
         monkeypatch.setenv("METADATA_API_KEY", "secret")

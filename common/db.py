@@ -79,6 +79,21 @@ def approx_count(conn: psycopg.Connection, table: str) -> int:
         return int(row[0]) if row else 0  # type: ignore[index]
 
 
+def estimated_count(conn: psycopg.Connection, table: str) -> int:
+    """Return PostgreSQL's current row estimate without scanning *table*.
+
+    This is intended for frequently refreshed operational UI.  Unlike
+    :func:`approx_count`, it never attempts an exact ``COUNT(*)`` first, so a
+    large table cannot consume the API statement timeout on every poll.
+    """
+    row = conn.execute(
+        "SELECT GREATEST(reltuples, 0)::bigint "
+        "FROM pg_class WHERE oid = %s::regclass",
+        (table,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def list_migrations() -> list[tuple[int, Path]]:
     found: list[tuple[int, Path]] = []
     for path in sorted(MIGRATIONS_DIR.iterdir()):

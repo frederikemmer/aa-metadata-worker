@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.deps import GetConnectionDependency, GetSettingsDependency
 from common.config import Settings
-from common.db import approx_count, list_migrations
+from common.db import estimated_count, list_migrations
 
 router = APIRouter(tags=["dashboard"])
 
@@ -57,14 +57,23 @@ def sync_status(
         ).fetchall()
     }
 
+    latest_sql = _RELEASE_SUMMARY_SQL.replace(
+        "SELECT collection", "SELECT DISTINCT ON (collection) collection", 1
+    )
+    latest_by_collection = {
+        row[0]: row
+        for row in conn.execute(
+            f"{latest_sql} WHERE collection = ANY(%s) "
+            "ORDER BY collection, discovered_at DESC",
+            (active_collections,),
+        ).fetchall()
+    }
+
     collections = []
     for name in settings.aa_collections:
-        rows = conn.execute(
-            f"{_RELEASE_SUMMARY_SQL} WHERE collection = %s ORDER BY discovered_at DESC LIMIT 1",
-            (name,),
-        ).fetchall()
-        if rows:
-            entry = _row_to_release(rows[0])
+        latest = latest_by_collection.get(name)
+        if latest:
+            entry = _row_to_release(latest)
         else:
             entry = {"collection": name, "status": "not_discovered"}
         mode_row = modes.get(name)
@@ -82,7 +91,9 @@ def sync_status(
         "FROM sync_releases WHERE collection = ANY(%s)",
         (active_collections,),
     ).fetchone()
-    records_row = approx_count(conn, "metadata_records")
+    # The dashboard refreshes frequently. Never make every poll wait for a
+    # potentially multi-second COUNT(*) scan of the large metadata table.
+    records_row = estimated_count(conn, "metadata_records")
     db_size_row = conn.execute("SELECT pg_database_size(current_database())").fetchone()
     version_row = conn.execute("SELECT COALESCE((SELECT MAX(version) FROM schema_migrations), 0)").fetchone()
     last_sync_row = conn.execute(

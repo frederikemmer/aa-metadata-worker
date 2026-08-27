@@ -37,6 +37,20 @@
   .err{color:var(--err);font-size:12px;white-space:pre-wrap;word-break:break-all}
   .idle{color:var(--dim);padding:10px 0}
   .refresh{float:right;color:var(--dim);font-size:11px}
+  .refresh::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;
+         background:var(--dim);margin-right:6px}
+  .refresh.ok::before{background:var(--ok)}
+  .refresh.loading::before{background:var(--run);animation:pulse 1s ease-in-out infinite alternate}
+  .refresh.error{color:var(--err)} .refresh.error::before{background:var(--err)}
+  .skeleton{position:relative;overflow:hidden;color:transparent!important;background:#222a34;border-radius:5px}
+  .skeleton::after{content:'';position:absolute;inset:0;transform:translateX(-100%);
+         background:linear-gradient(90deg,transparent,rgba(255,255,255,.07),transparent);
+         animation:shimmer 1.4s infinite}
+  .skeleton.big{height:29px;width:55%;margin-bottom:7px}
+  .skeleton.small{height:15px;width:85%}
+  @keyframes shimmer{100%{transform:translateX(100%)}}
+  @keyframes pulse{to{opacity:.35}}
+  @media (prefers-reduced-motion:reduce){.skeleton::after,.refresh.loading::before{animation:none}}
   .ctrl{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
   button{background:#1f2937;color:var(--text);border:1px solid var(--line);border-radius:8px;
          padding:8px 14px;font-size:13px;cursor:pointer;font-weight:600}
@@ -81,17 +95,22 @@
 </head>
 <body>
 <h1>AA Metadata Worker <span id="ver" class="small" style="font-weight:400"></span> <span class="refresh" id="upd"></span></h1>
-<div class="sub">Metadaten-Index aus Anna's Archive · Aktualisierung alle 2 s</div>
+<div class="sub">Metadaten-Index aus Anna's Archive · <span id="poll-cadence">Status wird geladen…</span></div>
 <div class="toast" id="toast"></div>
 
-<section class="grid cards" id="cards"></section>
+<section class="grid cards" id="cards">
+  <div class="card"><h2>Datensätze</h2><div class="skeleton big">Lädt</div><div class="skeleton small">Lädt</div></div>
+  <div class="card"><h2>Datenbank</h2><div class="skeleton big">Lädt</div><div class="skeleton small">Lädt</div></div>
+  <div class="card"><h2>Verworfen (Nicht-Buch)</h2><div class="skeleton big">Lädt</div><div class="skeleton small">Lädt</div></div>
+  <div class="card"><h2>Status</h2><div class="skeleton big">Lädt</div><div class="skeleton small">Lädt</div></div>
+</section>
 
 <section class="card">
   <h2>Steuerung</h2>
   <div class="ctrl">
     <button class="primary" id="btn-run">▶ Jetzt synchronisieren</button>
     <button id="btn-pause">⏸ Pause</button>
-    <span class="small" id="ctrl-state"></span>
+    <span class="small" id="ctrl-state">Steuerung wird geladen…</span>
     <span class="keybox">
       <input type="password" id="apikey" placeholder="API-Key (falls gesetzt)">
       <span class="small" style="cursor:pointer" onclick="localStorage.removeItem('aaApiKey');document.getElementById('apikey').value='';">✕</span>
@@ -101,7 +120,7 @@
 
 <section class="card">
   <h2>Aktive Downloads &amp; Imports</h2>
-  <div id="active"><div class="idle">Kein Sync aktiv.</div></div>
+  <div id="active"><div class="idle">Status wird geladen…</div></div>
 </section>
 
 <section class="card">
@@ -109,14 +128,14 @@
   <table id="colls"><thead><tr>
     <th>Collection</th><th>Status</th><th class="num">Records (neu/aktualisiert)</th>
     <th class="num">Verworfen</th><th class="num">Fehler</th><th>Fertig am</th><th>Modus</th>
-  </tr></thead><tbody></tbody></table>
+  </tr></thead><tbody><tr><td colspan="7" class="idle">Collections werden geladen…</td></tr></tbody></table>
 </section>
 
 <section class="card">
   <h2>Letzte Releases</h2>
   <table id="recent"><thead><tr>
     <th>Collection</th><th>Release</th><th>Status</th><th class="num">Gesehen</th><th>Fehlermeldung</th>
-  </tr></thead><tbody></tbody></table>
+  </tr></thead><tbody><tr><td colspan="5" class="idle">Releases werden geladen…</td></tr></tbody></table>
 </section>
 
 <section class="card">
@@ -166,6 +185,7 @@ const pill = s => `<span class="pill p-${s}">${s}</span>`;
 let prevActiveKey = null, prevCount = null;
 let control = {paused:false, enabled:true};
 let appVersion = null, latestSha = null;
+let dashboardData = null, tickTimer = null, tickRunning = false;
 
 // Version display: baked-in build SHA compared against GitHub main (public API,
 // polled rarely to respect the rate limit).
@@ -248,7 +268,7 @@ async function sendCommand(action){
     if(r.status===401){ toast('Falscher/fehlender API-Key (unten eintragen).', false); return; }
     if(!r.ok){ const e = await r.json().catch(()=>({})); toast(e.detail||'Fehler', false); return; }
     toast(labels[action]||'OK');
-    tick();
+    queueTick();
   }catch(e){ toast('Netzwerkfehler', false); }
 }
 
@@ -268,7 +288,7 @@ async function toggleMode(collection, mode){
     if(r.status===401){ toast('Falscher/fehlender API-Key (unten eintragen).', false); return; }
     if(!r.ok){ const e = await r.json().catch(()=>({})); toast(e.detail||'Fehler', false); return; }
     toast(`${collection}: Modus → ${target}`);
-    tick();
+    queueTick();
   }catch(e){ toast('Netzwerkfehler', false); }
 }
 
@@ -301,7 +321,7 @@ function renderControl(){
 }
 
 function render(d){
-  document.getElementById('upd').textContent = new Date().toLocaleTimeString('de-DE');
+  dashboardData = d;
   if (!appVersion || appVersion !== d.appVersion){ appVersion = d.appVersion; renderVersion(); }
   const pctUsed = d.databaseSizeBytes/ (d.storageStopGib*1073741824) *100;
   const level = d.databaseSizeBytes >= d.storageStopGib*1073741824 ? 'stop'
@@ -373,19 +393,73 @@ function render(d){
     <td class="err">${r.errorMessage?trunc(r.errorMessage,90):''}</td></tr>`).join('');
 }
 
-async function tick(){
+async function fetchJson(url){
+  const controller = new AbortController();
+  const timeout = setTimeout(()=>controller.abort(), 10000);
   try{
-    const r = await fetch('/api/v1/sync/status');
-    if(r.ok){ render(await r.json()); }
-  }catch(e){ /* keep last state */ }
-  try{
-    const c = await fetch('/api/v1/sync/control');
-    if(c.ok){ control = {...control, ...(await c.json())}; renderControl(); }
-  }catch(e){ /* keep last state */ }
+    const response = await fetch(url, {signal:controller.signal, cache:'no-store'});
+    if(!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
-tick();
+
+function setConnectionState(state, label){
+  const el = document.getElementById('upd');
+  el.className = `refresh ${state}`;
+  el.textContent = label;
+}
+
+function nextPollDelay(){
+  if(document.hidden) return 30000;
+  const active = dashboardData?.collections?.some(c =>
+    ['downloading','importing','validating'].includes(c.status));
+  return active ? 2000 : 10000;
+}
+
+function scheduleNextTick(){
+  const delay = nextPollDelay();
+  document.getElementById('poll-cadence').textContent = document.hidden
+    ? 'reduziert (Tab inaktiv)'
+    : `Aktualisierung alle ${delay/1000} s`;
+  clearTimeout(tickTimer);
+  tickTimer = setTimeout(tick, delay);
+}
+
+function queueTick(){
+  clearTimeout(tickTimer);
+  tickTimer = setTimeout(tick, 0);
+}
+
+async function tick(){
+  if(tickRunning) return;
+  tickRunning = true;
+  setConnectionState('loading', dashboardData ? 'Aktualisiere…' : 'Lade Status…');
+  const [statusResult, controlResult] = await Promise.allSettled([
+    fetchJson('/api/v1/sync/status'), fetchJson('/api/v1/sync/control')
+  ]);
+  if(statusResult.status === 'fulfilled') render(statusResult.value);
+  if(controlResult.status === 'fulfilled'){
+    control = {...control, ...controlResult.value};
+    renderControl();
+  }
+  const fullSuccess = statusResult.status === 'fulfilled' && controlResult.status === 'fulfilled';
+  if(fullSuccess){
+    setConnectionState('ok', `Aktuell · ${new Date().toLocaleTimeString('de-DE')}`);
+  } else {
+    setConnectionState('error', dashboardData ? 'Teilweise nicht erreichbar' : 'Status nicht erreichbar');
+    if(!dashboardData){
+      document.getElementById('active').innerHTML =
+        '<div class="err">Dashboard-Daten konnten nicht geladen werden. Automatischer neuer Versuch folgt.</div>';
+    }
+  }
+  tickRunning = false;
+  scheduleNextTick();
+}
+document.addEventListener('visibilitychange', queueTick);
+queueTick();
 checkLatestRelease();
-setInterval(tick, 2000);
 setInterval(checkLatestRelease, 300000);
 
 // --- Search ---

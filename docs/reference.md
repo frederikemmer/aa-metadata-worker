@@ -491,7 +491,9 @@ Alle Versionen eines Werks, sortiert nach Quality Score (beste Version zuerst).
 ### 7.6 Sync-Status (`GET /api/v1/sync/status`)
 
 Dashboard-Endpoint. Liefert pro Collection den neuesten Release + aktiven
-Sync + aggregierte Counter. Auth-exempt.
+Sync + aggregierte Counter. Auth-exempt. Die Datensatzanzahl verwendet hier
+direkt die PostgreSQL-Schätzung aus `pg_class`, damit das häufige Dashboard-
+Polling nie auf einen vollständigen `COUNT(*)`-Scan wartet.
 
 Top-Level `appVersion` enthält den beim Docker-Build eingebrannten Git-Commit
 (`APP_VERSION` build-arg, lokal `"dev"`). Das Dashboard zeigt ihn neben der
