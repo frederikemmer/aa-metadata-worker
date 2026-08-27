@@ -7,6 +7,7 @@ proxies or resolves book file downloads.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 from contextlib import asynccontextmanager
 
@@ -21,6 +22,32 @@ logger = logging.getLogger(__name__)
 
 # Module-level stop event shared with the sync worker thread.
 _sync_stop = threading.Event()
+
+
+def _configure_logging() -> None:
+    """Ensure the background sync worker logs reach stdout/docker logs.
+
+    Uvicorn configures its own (uvicorn.*) loggers but leaves the root logger
+    at WARNING with only a placeholder handler, which silently swallows every
+    `logger.info(...)` emitted by sync.*, app.* and common.*.  Install a real
+    StreamHandler on the root logger so download/import progress is visible
+    in `docker logs` (used for diagnosing stalled torrents).
+    """
+    root = logging.getLogger()
+    # Skip if something already attached a non-stub handler.
+    if any(getattr(h, "_aa_installed", False) for h in root.handlers):
+        return
+    level_name = load_settings().log_level
+    root.setLevel(getattr(logging, level_name, logging.INFO))
+    handler = logging.StreamHandler(sys.stdout)
+    handler._aa_installed = True  # type: ignore[attr-defined]
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root.addHandler(handler)
+
+
+_configure_logging()
 
 
 def _start_sync_worker() -> None:
