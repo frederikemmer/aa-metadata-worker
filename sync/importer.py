@@ -115,6 +115,8 @@ class ImportStats:
     failed: int = 0
     batches: int = 0
     error_samples: list[str] = field(default_factory=list)
+    discard_reasons: dict[str, int] = field(default_factory=dict)
+    discard_samples: dict[str, list[dict]] = field(default_factory=dict)
 
 
 def _strip_nul(value: str | None) -> str | None:
@@ -358,14 +360,27 @@ def import_release(
     logger.info("Importing %s from %s", collection, payload_path.name)
 
     flushed = {"seen": 0, "inserted": 0, "updated": 0, "skipped": 0, "discarded": 0, "failed": 0}
+    flushed_reasons: dict[str, int] = {}
 
     def flush() -> None:
-        nonlocal batch
+        nonlocal batch, flushed_reasons
         if batch:
             process_batch(conn, batch, stats)
         deltas = {key: getattr(stats, key) - flushed[key] for key in flushed}
         if any(deltas.values()):
             state.update_release_counters(conn, release_id, **deltas)
+        reason_deltas = {
+            reason: count - flushed_reasons.get(reason, 0)
+            for reason, count in stats.discard_reasons.items()
+        }
+        if any(delta > 0 for delta in reason_deltas.values()):
+            state.update_discard_analysis(
+                conn,
+                release_id,
+                reason_deltas,
+                stats.discard_samples,
+            )
+            flushed_reasons = dict(stats.discard_reasons)
         for key in flushed:
             flushed[key] = getattr(stats, key)
         batch = []
@@ -402,6 +417,19 @@ def import_release(
                 for record in parsed:
                     if record.discarded:
                         stats.discarded += 1
+                        reason = record.discard_reason or "unspecified"
+                        stats.discard_reasons[reason] = stats.discard_reasons.get(reason, 0) + 1
+                        samples = stats.discard_samples.setdefault(reason, [])
+                        if len(samples) < 3:
+                            sample = {
+                                "md5": record.md5.hex(),
+                                "sourceRecordId": record.source_record_id,
+                                "aacid": record.aacid,
+                                "title": record.title[:160] if record.title else None,
+                                "authors": record.authors[:3],
+                            }
+                            if sample not in samples:
+                                samples.append(sample)
                     else:
                         batch.append((record, line))
         except Exception as error:  # noqa: BLE001 - single broken record must not kill import

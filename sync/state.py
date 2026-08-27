@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 # Stable advisory-lock key so concurrent syncs (e.g. worker + manual CLI)
 # are impossible even across container restarts.
@@ -134,11 +135,15 @@ def set_release_status(
 ) -> None:
     assert status in RELEASE_STATUSES
     started = ", started_at = now()" if status == "downloading" else ""
+    import_started = (
+        ", import_started_at = COALESCE(import_started_at, now())" if status == "importing" else ""
+    )
     completed = ", completed_at = now()" if status == "completed" else ""
     counters = (
         ", records_seen = 0, records_inserted = 0, records_updated = 0, "
         "records_skipped = 0, records_discarded = 0, records_failed = 0, "
-        "import_done_bytes = 0, import_total_bytes = 0"
+        "import_done_bytes = 0, import_total_bytes = 0, import_started_at = NULL, "
+        "discard_reasons = '{}'::jsonb, discard_samples = '{}'::jsonb"
         if reset_counters
         else ""
     )
@@ -146,7 +151,7 @@ def set_release_status(
         f"""
         UPDATE sync_releases
         SET status = %s,
-            error_message = %s{started}{completed}{counters}
+            error_message = %s{started}{import_started}{completed}{counters}
         WHERE id = %s
         """,
         (status, error_message, release_id),
@@ -176,6 +181,36 @@ def update_release_counters(
         """,
         (seen, inserted, updated, skipped, discarded, failed, release_id),
     )
+
+
+def update_discard_analysis(
+    conn: psycopg.Connection,
+    release_id: int,
+    reason_deltas: dict[str, int],
+    samples: dict[str, list[dict]],
+) -> None:
+    """Persist bounded discard reason counters and representative samples."""
+    for reason, delta in reason_deltas.items():
+        if delta <= 0:
+            continue
+        conn.execute(
+            """
+            UPDATE sync_releases
+            SET discard_reasons = jsonb_set(
+                discard_reasons,
+                ARRAY[%s],
+                to_jsonb(COALESCE((discard_reasons ->> %s)::bigint, 0) + %s),
+                true
+            )
+            WHERE id = %s
+            """,
+            (reason, reason, delta, release_id),
+        )
+    if samples:
+        conn.execute(
+            "UPDATE sync_releases SET discard_samples = discard_samples || %s WHERE id = %s",
+            (Jsonb(samples), release_id),
+        )
 
 
 def update_download_progress(

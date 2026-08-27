@@ -103,6 +103,8 @@ Containername erreicht.
 
 * aktiver Sync: Phase (Download/Import/Validierung), Fortschrittsbalken,
   Zähler (gesehen/neu/aktualisiert/übersprungen/verworfen/Fehler)
+* Import-Leistung mit Records/s, Datenrate, Laufzeit, ETA und Release-Historie
+* Filteranalyse nach Verwerfungsgrund mit wenigen repräsentativen Metadaten-Beispielen
 * Collections-Übersicht mit letztem Release-Status
 * Storage-Budget-Balken gegen Warn/Stopp-Grenzen
 * die letzten Releases inklusive Fehlermeldungen

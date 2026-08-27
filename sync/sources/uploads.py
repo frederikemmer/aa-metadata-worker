@@ -64,36 +64,32 @@ class UploadsAdapter(SourceAdapter):
             return []
 
         settings = self.settings
-
-        # ── Book-only filters ────────────────────────────────────────────
-        subcoll = subcollection_of(raw.get("aacid"))
-        if subcoll and subcoll in set(settings.upload_blocked_subcollections):
-            return [
-                NormalizedRecord(
-                    md5=md5,
-                    source_collection=self.collection,
-                    discarded=True,
-                    discard_reason=f"blocked_subcollection:{subcoll}",
-                )
-            ]
-
         exif = meta.get("exiftool_output") or {}
         pikepdf = meta.get("pikepdf_docinfo") or {}
-
         bibliographic_title = str(exif.get("Title") or "").strip() or str(pikepdf.get("/Title") or "").strip()
         bibliographic_author = (
             str(exif.get("Author") or "").strip() or str(pikepdf.get("/Author") or "").strip()
         )
 
+        def discarded_record(reason: str) -> NormalizedRecord:
+            return NormalizedRecord(
+                md5=md5,
+                title=bibliographic_title,
+                authors=[author.strip() for author in bibliographic_author.split(";") if author.strip()],
+                source_collection=self.collection,
+                source_record_id=str(meta.get("primary_id")) if meta.get("primary_id") else None,
+                aacid=raw.get("aacid"),
+                discarded=True,
+                discard_reason=reason,
+            )
+
+        # ── Book-only filters ────────────────────────────────────────────
+        subcoll = subcollection_of(raw.get("aacid"))
+        if subcoll and subcoll in set(settings.upload_blocked_subcollections):
+            return [discarded_record(f"blocked_subcollection:{subcoll}")]
+
         if settings.upload_require_title_author and not (bibliographic_title and bibliographic_author):
-            return [
-                NormalizedRecord(
-                    md5=md5,
-                    source_collection=self.collection,
-                    discarded=True,
-                    discard_reason="missing_title_or_author",
-                )
-            ]
+            return [discarded_record("missing_title_or_author")]
         # ─────────────────────────────────────────────────────────────────
 
         title = bibliographic_title or _title_from_filepath(str(meta.get("filepath") or ""))

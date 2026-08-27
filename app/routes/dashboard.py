@@ -30,8 +30,17 @@ SELECT collection, release_identifier, status, data_size_bytes,
        import_done_bytes, import_total_bytes,
        records_seen, records_inserted, records_updated,
        records_skipped, records_discarded, records_failed,
-       error_message,
+       error_message, discard_reasons, discard_samples,
+       CASE
+         WHEN import_started_at IS NULL THEN NULL
+         WHEN status IN ('importing', 'validating')
+           THEN EXTRACT(EPOCH FROM (now() - import_started_at))::bigint
+         WHEN completed_at IS NOT NULL
+           THEN EXTRACT(EPOCH FROM (completed_at - import_started_at))::bigint
+         ELSE NULL
+       END AS import_duration_seconds,
        to_char(started_at, 'YYYY-MM-DD HH24:MI:SS') AS started,
+       to_char(import_started_at, 'YYYY-MM-DD HH24:MI:SS') AS import_started,
        to_char(completed_at, 'YYYY-MM-DD HH24:MI:SS') AS completed
 FROM sync_releases
 """
@@ -100,6 +109,27 @@ def sync_status(
         "SELECT to_char(MAX(completed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSOF') FROM sync_releases "
         "WHERE status='completed'"
     ).fetchone()
+    discard_reason_rows = conn.execute(
+        "SELECT reason.key, SUM(reason.value::bigint) "
+        "FROM sync_releases, LATERAL jsonb_each_text(discard_reasons) AS reason "
+        "WHERE collection = ANY(%s) GROUP BY reason.key ORDER BY SUM(reason.value::bigint) DESC",
+        (active_collections,),
+    ).fetchall()
+    discard_sample_rows = conn.execute(
+        "SELECT discard_samples FROM sync_releases "
+        "WHERE collection = ANY(%s) AND discard_samples <> '{}'::jsonb "
+        "ORDER BY discovered_at DESC LIMIT 20",
+        (active_collections,),
+    ).fetchall()
+    discard_samples: dict[str, list[dict]] = {}
+    for row in discard_sample_rows:
+        for reason, samples in row[0].items():
+            target = discard_samples.setdefault(reason, [])
+            for sample in samples:
+                if len(target) >= 3:
+                    break
+                if sample not in target:
+                    target.append(sample)
 
     try:
         disk_free = shutil.disk_usage(WORK_DIR).free
@@ -123,6 +153,14 @@ def sync_status(
         "releasesTracked": int(totals_row[0]),
         "totalDiscarded": int(totals_row[1]),
         "totalFailed": int(totals_row[2]),
+        "discardAnalysis": [
+            {
+                "reason": row[0],
+                "count": int(row[1]),
+                "samples": discard_samples.get(row[0], []),
+            }
+            for row in discard_reason_rows
+        ],
         "activeSync": active,
         "collections": collections,
         "recentReleases": [_row_to_release(row) for row in recent_rows],
@@ -145,7 +183,11 @@ _COLUMNS = (
     "records_discarded",
     "records_failed",
     "error_message",
+    "discard_reasons",
+    "discard_samples",
+    "import_duration_seconds",
     "started",
+    "import_started",
     "completed",
 )
 
@@ -168,7 +210,11 @@ def _row_to_release(row: tuple) -> dict:
         "recordsDiscarded": data["records_discarded"],
         "recordsFailed": data["records_failed"],
         "errorMessage": data["error_message"],
+        "discardReasons": data["discard_reasons"],
+        "discardSamples": data["discard_samples"],
+        "importDurationSeconds": data["import_duration_seconds"],
         "startedAt": data["started"],
+        "importStartedAt": data["import_started"],
         "completedAt": data["completed"],
     }
 

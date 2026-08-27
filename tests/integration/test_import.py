@@ -72,12 +72,19 @@ class TestImportPipeline:
         stats = import_release(db_conn, "upload_records", payload, release_id, settings=settings)
 
         row = db_conn.execute(
-            "SELECT records_seen, records_discarded FROM sync_releases WHERE id = %s",
+            "SELECT records_seen, records_discarded, discard_reasons, discard_samples "
+            "FROM sync_releases WHERE id = %s",
             (release_id,),
         ).fetchone()
         assert stats.seen == 2
         assert stats.discarded == 2
-        assert row == (2, 2)
+        assert row[0:2] == (2, 2)
+        assert row[2] == {"blocked_subcollection:academia_edu": 2}
+        samples = row[3]["blocked_subcollection:academia_edu"]
+        assert len(samples) == 1
+        assert samples[0]["title"] == "Paper"
+        assert samples[0]["authors"] == ["Author"]
+        assert samples[0]["aacid"].startswith("aacid__upload_records_academia_edu")
         assert counter_updates == [
             {"seen": 2, "inserted": 0, "updated": 0, "skipped": 0, "discarded": 2, "failed": 0}
         ]

@@ -27,6 +27,7 @@ class TestSyncStatusJson:
             "ready", "appVersion", "records", "databaseSizeBytes", "diskFreeBytes",
             "storageWarnGib", "storageStopGib", "activeSync",
             "collections", "recentReleases", "totalDiscarded",
+            "discardAnalysis",
         ):
             assert key in body, f"missing key {key}"
         assert body["activeSync"] is None
@@ -86,6 +87,41 @@ class TestSyncStatusJson:
         # It also shows up in the collections list and recent releases.
         assert any(r["releaseIdentifier"] == "rel_live" for r in body["recentReleases"])
 
+    def test_import_analytics_and_discard_reasons_visible(self, client, db_conn):
+        db_conn.execute(
+            """
+            INSERT INTO sync_releases
+                (collection, release_identifier, status, import_started_at,
+                 import_done_bytes, import_total_bytes, records_seen, records_discarded,
+                 discard_reasons, discard_samples, started_at)
+            VALUES
+                ('upload_records', 'analytics', 'importing', now() - interval '10 seconds',
+                 1048576, 2097152, 1000, 700,
+                 '{"missing_title_or_author": 700}',
+                 jsonb_build_object(
+                   'missing_title_or_author',
+                   jsonb_build_array(jsonb_build_object(
+                     'title', null, 'authors', jsonb_build_array(), 'sourceRecordId', 'sample-1'
+                   ))
+                 ),
+                 now() - interval '1 minute')
+            """
+        )
+        body = client.get("/api/v1/sync/status").json()
+        release = next(r for r in body["recentReleases"] if r["releaseIdentifier"] == "analytics")
+        assert release["importDurationSeconds"] >= 9
+        assert release["importStartedAt"] is not None
+        assert release["discardReasons"] == {"missing_title_or_author": 700}
+        assert body["discardAnalysis"] == [
+            {
+                "reason": "missing_title_or_author",
+                "count": 700,
+                "samples": [
+                    {"title": None, "authors": [], "sourceRecordId": "sample-1"}
+                ],
+            }
+        ]
+
 
 class TestDashboardHtml:
     def test_root_redirects(self, client):
@@ -101,6 +137,8 @@ class TestDashboardHtml:
         assert "/api/v1/sync/status" in html  # the page polls this endpoint
         assert "setInterval(tick" not in html  # slow requests must never overlap
         assert "Status wird geladen" in html
+        assert "Import-Leistung" in html
+        assert "Filteranalyse" in html
 
     def test_dashboard_exempt_from_auth(self, db_conn, monkeypatch):
         monkeypatch.setenv("METADATA_API_KEY", "secret")

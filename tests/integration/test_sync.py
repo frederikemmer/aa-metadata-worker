@@ -165,6 +165,11 @@ class TestStateAndLocking:
             "SELECT status, records_seen, records_inserted FROM sync_releases WHERE id=%s", (rid,)
         ).fetchone()
         assert row[0] == "downloading" and row[1] == 15 and row[2] == 11
+        state.set_release_status(db_conn, rid, "importing")
+        import_started = db_conn.execute(
+            "SELECT import_started_at FROM sync_releases WHERE id=%s", (rid,)
+        ).fetchone()[0]
+        assert import_started is not None
         state.set_release_status(db_conn, rid, "completed")
         assert state.completed_release_identifiers(db_conn, "ia2_records") == {"rel-b"}
 

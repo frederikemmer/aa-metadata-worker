@@ -33,6 +33,16 @@
   .bar.warn>div{background:var(--warn)} .bar.stop>div{background:var(--err)}
   .counters{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:8px;font-size:12px;color:var(--dim)}
   .counters b{color:var(--text);font-variant-numeric:tabular-nums}
+  .perf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-bottom:12px}
+  .perf-item{background:#12171d;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .perf-item b{display:block;margin-bottom:4px}
+  .perf-item .big{font-size:18px}
+  .reason-row{padding:10px 0;border-bottom:1px solid var(--line)}
+  .reason-row:last-child{border-bottom:none}
+  .reason-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+  details{margin-top:6px;color:var(--dim);font-size:12px}
+  summary{cursor:pointer;color:var(--accent)}
+  .sample{margin:6px 0 0 14px;padding-left:9px;border-left:2px solid var(--line)}
   section{margin-top:16px}
   .err{color:var(--err);font-size:12px;white-space:pre-wrap;word-break:break-all}
   .idle{color:var(--dim);padding:10px 0}
@@ -124,6 +134,16 @@
 </section>
 
 <section class="card">
+  <h2>Import-Leistung</h2>
+  <div id="performance"><div class="idle">Geschwindigkeit und Historie werden geladen…</div></div>
+</section>
+
+<section class="card">
+  <h2>Filteranalyse</h2>
+  <div id="filter-analysis"><div class="idle">Filtergründe werden geladen…</div></div>
+</section>
+
+<section class="card">
   <h2>Collections</h2>
   <table id="colls"><thead><tr>
     <th>Collection</th><th>Status</th><th class="num">Records (neu/aktualisiert)</th>
@@ -179,6 +199,14 @@ const fmtEta = s => {
   if (h > 0) return `~${h} Std ${m} Min`;
   if (m >= 1) return `~${m} Min`;
   return '<1 Min';
+};
+const fmtDuration = s => {
+  if (!s || s < 1) return '–';
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  if (d) return `${d} T ${h} Std`;
+  if (h) return `${h} Std ${m} Min`;
+  if (m) return `${m} Min`;
+  return `${Math.round(s)} Sek`;
 };
 const trunc = (s,n=46) => !s ? '' : (s.length>n ? s.slice(0,n)+'…' : s);
 const pill = s => `<span class="pill p-${s}">${s}</span>`;
@@ -391,6 +419,85 @@ function render(d){
     <tr><td>${r.collection}</td><td class="small">${trunc(r.releaseIdentifier?.replace('annas_archive_meta__aacid__',''),40)}</td>
     <td>${pill(r.status)}</td><td class="num">${fmt(r.recordsSeen)}</td>
     <td class="err">${r.errorMessage?trunc(r.errorMessage,90):''}</td></tr>`).join('');
+
+  renderPerformance(d);
+  renderDiscardAnalysis(d);
+}
+
+function importMetrics(release){
+  const seconds = release.importDurationSeconds || 0;
+  const recordsPerSecond = seconds > 0 ? release.recordsSeen / seconds : 0;
+  const bytesPerSecond = seconds > 0 ? release.importDoneBytes / seconds : 0;
+  const remaining = Math.max(0, (release.importTotalBytes||0) - (release.importDoneBytes||0));
+  return {
+    seconds, recordsPerSecond, bytesPerSecond,
+    etaSeconds: bytesPerSecond > 0 && remaining > 0 ? remaining / bytesPerSecond : 0
+  };
+}
+
+function renderPerformance(d){
+  const activeImports = d.collections.filter(c => ['importing','validating'].includes(c.status));
+  const history = d.recentReleases.filter(r => r.importDurationSeconds > 0).slice(0, 8);
+  let html = '';
+  if(activeImports.length){
+    html += '<div class="perf-grid">' + activeImports.map(r=>{
+      const m = importMetrics(r);
+      if(!m.seconds){
+        return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
+          <div class="small">Messung beginnt mit dem nächsten Import-Start.</div></div>`;
+      }
+      return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
+        <div class="big">${fmt(Math.round(m.recordsPerSecond))} Records/s</div>
+        <div class="small">${scaleBytes(m.bytesPerSecond)}/s · Laufzeit ${fmtDuration(m.seconds)} · ETA ${fmtEta(m.etaSeconds)}</div></div>`;
+    }).join('') + '</div>';
+  }
+  if(history.length){
+    html += `<table><thead><tr><th>Release</th><th>Status</th><th class="num">Laufzeit</th>
+      <th class="num">Records/s</th><th class="num">Daten/s</th></tr></thead><tbody>` +
+      history.map(r=>{
+        const m = importMetrics(r);
+        return `<tr><td><b>${escapeHtml(r.collection)}</b><div class="small">${escapeHtml(trunc(r.releaseIdentifier,42))}</div></td>
+          <td>${pill(r.status)}</td><td class="num">${fmtDuration(m.seconds)}</td>
+          <td class="num">${fmt(Math.round(m.recordsPerSecond))}</td>
+          <td class="num">${scaleBytes(m.bytesPerSecond)}/s</td></tr>`;
+      }).join('') + '</tbody></table>';
+  }
+  document.getElementById('performance').innerHTML = html ||
+    '<div class="idle">Noch keine Import-Messwerte vorhanden. Sie werden ab dem nächsten Import-Start aufgezeichnet.</div>';
+}
+
+function discardReasonLabel(reason){
+  if(reason === 'missing_title_or_author') return 'Titel oder Autor fehlt';
+  if(reason === 'unspecified') return 'Kein genauer Grund gemeldet';
+  if(reason.startsWith('blocked_subcollection:')) return 'Gesperrte Subcollection: '+reason.split(':',2)[1];
+  if(reason.startsWith('ia_mediatype:')) return 'Internet-Archive-Medientyp: '+reason.split(':',2)[1];
+  if(reason.startsWith('gbooks_printtype:')) return 'Google-Books-Typ: '+reason.split(':',2)[1];
+  if(reason.startsWith('libby_type:')) return 'Libby-Medientyp: '+reason.split(':',2)[1];
+  return reason;
+}
+
+function renderDiscardAnalysis(d){
+  const analysis = d.discardAnalysis || [];
+  if(!analysis.length){
+    document.getElementById('filter-analysis').innerHTML =
+      '<div class="idle">Noch keine aufgeschlüsselten Filtergründe. Bereits vorhandene Gesamtzähler bleiben erhalten; Details werden ab dem nächsten Importfortschritt erfasst.</div>';
+    return;
+  }
+  const knownTotal = analysis.reduce((sum, item)=>sum+item.count, 0);
+  document.getElementById('filter-analysis').innerHTML = analysis.map(item=>{
+    const percent = knownTotal ? item.count/knownTotal*100 : 0;
+    const samples = (item.samples||[]).map(sample=>{
+      const title = sample.title || '(kein Titel)';
+      const authors = (sample.authors||[]).join('; ') || 'kein Autor';
+      const source = sample.sourceRecordId || sample.aacid || sample.md5 || '–';
+      return `<div class="sample"><b>${escapeHtml(title)}</b> · ${escapeHtml(authors)}
+        <div class="small">Quelle: ${escapeHtml(source)}</div></div>`;
+    }).join('');
+    return `<div class="reason-row"><div class="reason-head"><b>${escapeHtml(discardReasonLabel(item.reason))}</b>
+      <span><b>${fmt(item.count)}</b> <span class="small">(${percent.toFixed(1)}%)</span></span></div>
+      <div class="bar"><div style="width:${Math.max(percent,.4)}%;background:var(--warn)"></div></div>
+      ${samples ? `<details><summary>${item.samples.length} Beispiel${item.samples.length===1?'':'e'} anzeigen</summary>${samples}</details>` : ''}</div>`;
+  }).join('');
 }
 
 async function fetchJson(url){

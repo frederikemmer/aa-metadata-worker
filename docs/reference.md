@@ -495,6 +495,11 @@ Sync + aggregierte Counter. Auth-exempt. Die Datensatzanzahl verwendet hier
 direkt die PostgreSQL-Schätzung aus `pg_class`, damit das häufige Dashboard-
 Polling nie auf einen vollständigen `COUNT(*)`-Scan wartet.
 
+Ab Schema v8 enthalten Releases außerdem `importStartedAt`,
+`importDurationSeconds`, `discardReasons` und bounded `discardSamples`.
+Top-Level `discardAnalysis` aggregiert die Filtergründe über die aktiven
+Collections; je Grund werden höchstens drei kompakte Beispiele ausgegeben.
+
 Top-Level `appVersion` enthält den beim Docker-Build eingebrannten Git-Commit
 (`APP_VERSION` build-arg, lokal `"dev"`). Das Dashboard zeigt ihn neben der
 Überschrift und gleicht ihn mit GitHub ab („✓ aktuell" / „⟳ Update verfügbar").
