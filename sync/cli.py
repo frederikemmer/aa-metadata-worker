@@ -329,8 +329,10 @@ def cmd_purge_sources(args: argparse.Namespace) -> int:
             f"Deleted {deleted_records:,} records, {deleted_releases:,} release rows "
             f"and {deleted_modes:,} collection-mode rows."
         )
-        print("VACUUM (ANALYZE) metadata_records (space becomes reusable):")
-        conn.execute("VACUUM (ANALYZE) metadata_records")
+        print("VACUUM (ANALYZE, PARALLEL 0) metadata_records (space becomes reusable):")
+        # Docker's default /dev/shm is intentionally small. Disabling parallel
+        # vacuum avoids shared-memory allocation failures on large tables.
+        conn.execute("VACUUM (ANALYZE, PARALLEL 0) metadata_records")
         remaining = conn.execute(
             "SELECT source_collection, COUNT(*) FROM metadata_records "
             "GROUP BY 1 ORDER BY 1"
