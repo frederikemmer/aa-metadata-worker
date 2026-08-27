@@ -52,15 +52,20 @@ class PartialDownloadError(TorrentDownloadError):
         self.path = path
 
 
-def _adaptive_stall_timeout(progress: float, base: float = 900.0) -> float:
+def _adaptive_stall_timeout(
+    progress: float, base: float = 900.0, at_99_s: float = 900.0
+) -> float:
     """Return a stall timeout that scales up as the download nears completion.
 
-    At 99%+ the remaining pieces may be rare and DHT/peer discovery needs time
-    to locate specific seeders.  However 3600s was too aggressive — 15 min is
-    enough to decide the torrent is hopeless and fall back to the magnet link.
+    At 99%+ the remaining pieces may be rare, but waiting indefinitely for them
+    is wasteful: a cumulative release has its new records appended at the end,
+    so the missing tail can simply be imported later.  `at_99_s` (configurable,
+    default 15 min) decides how long to wait for the last rare pieces before
+    declaring the download stalled and falling back to the magnet link / a
+    partial import of the already-downloaded payload.
     """
     if progress >= 0.99:
-        return max(base, 900.0)   # 15 min — then try magnet link
+        return max(base, at_99_s)  # give up on rare tail pieces after at_99_s
     if progress >= 0.95:
         return max(base, 1800.0)  # 30 min — pieces may still be findable
     if progress >= 0.90:
@@ -77,8 +82,10 @@ class TorrentClient:
         *,
         listen_port: int = 6881,
         checking_grace_s: float = 7200.0,
+        stall_at_99_s: float = 900.0,
     ):
         self.checking_grace_s = checking_grace_s
+        self.stall_at_99_s = stall_at_99_s
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -251,8 +258,9 @@ class TorrentClient:
             if handle.is_paused():
                 handle.unset_flags(lt.torrent_flags.paused)
 
-            # Adaptive stall timeout: wait longer near completion.
-            stall_limit = _adaptive_stall_timeout(progress)
+            # Adaptive stall timeout: wait longer near completion, but give up
+            # on rare tail pieces (>=99%) after the configured window.
+            stall_limit = _adaptive_stall_timeout(progress, at_99_s=self.stall_at_99_s)
             stalled_s = now - last_progress_change
 
             if stalled_s > stall_limit:

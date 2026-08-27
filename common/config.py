@@ -95,6 +95,13 @@ class Settings:
     # that is genuinely stuck in an endless re-check.
     sync_checking_grace_min: int = 120
 
+    # Minutes to wait for the last remaining (>=99% progress) pieces before
+    # declaring the download stalled.  At this point the already-downloaded
+    # payload is imported resiliently instead of waiting indefinitely for rare
+    # tail pieces that may never arrive.  Cumulative releases append new records
+    # at the end, so the missing tail is simply imported on a later run.
+    sync_stall_at_99_min: int = 15
+
     # Storage guard (GiB). Defaults sized for NAS deployment (see docs/sync.md).
     storage_warn_gib: int = 300
     storage_stop_gib: int = 400
@@ -144,6 +151,7 @@ def load_settings() -> Settings:
         sync_reuse_prev_payload=_env_bool("SYNC_REUSE_PREV_PAYLOAD", True),
         sync_max_downloads=_env_int("SYNC_MAX_DOWNLOADS", 4),
         sync_checking_grace_min=_env_int("SYNC_CHECKING_GRACE_MIN", 120),
+        sync_stall_at_99_min=_env_int("SYNC_STALL_AT_99PCT_MIN", 15),
         storage_warn_gib=_env_int("STORAGE_WARN_GIB", 300),
         storage_stop_gib=_env_int("STORAGE_STOP_GIB", 400),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),

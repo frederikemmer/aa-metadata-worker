@@ -103,6 +103,7 @@ def _download_one(
             work_dir,
             listen_port=listen_port,
             checking_grace_s=settings.sync_checking_grace_min * 60,
+            stall_at_99_s=settings.sync_stall_at_99_min * 60,
         )
 
         seed_base = (
@@ -244,6 +245,7 @@ def _download_sequential(
                     client = TorrentClient(
                         work_dir,
                         checking_grace_s=settings.sync_checking_grace_min * 60,
+                        stall_at_99_s=settings.sync_stall_at_99_min * 60,
                     )
 
                 seed_base = (

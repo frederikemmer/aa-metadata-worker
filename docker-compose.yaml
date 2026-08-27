@@ -87,6 +87,9 @@ services:
       # der Stall-Timeout greift. Beim Resume wird der große Seed-Base (z. B.
       # 24 GiB zlib3) neu gehasht — das darf nicht als "Stall" abgebrochen werden.
       SYNC_CHECKING_GRACE_MIN: "120"             # Minuten (Default 120)
+      # Nach X Minuten ohne Fortschritt bei >=99 % wird der vorhandene Payload
+      # resilient importiert (seltene letzte Pieces nicht endlos abwarten).
+      SYNC_STALL_AT_99PCT_MIN: "15"              # Minuten (Default 15)
 
       # Storage-Budget (GiB): Warnung / harter Stopp für Downloads+Imports
       STORAGE_WARN_GIB: "300"
