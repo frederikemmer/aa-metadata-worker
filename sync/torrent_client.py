@@ -42,15 +42,16 @@ class TorrentDownloadError(RuntimeError):
 def _adaptive_stall_timeout(progress: float, base: float = 900.0) -> float:
     """Return a stall timeout that scales up as the download nears completion.
 
-    At 99%+ we wait much longer because the remaining pieces may be rare and
-    DHT/peer discovery can take a long time to locate specific seeders.
+    At 99%+ the remaining pieces may be rare and DHT/peer discovery needs time
+    to locate specific seeders.  However 3600s was too aggressive — 15 min is
+    enough to decide the torrent is hopeless and fall back to the magnet link.
     """
     if progress >= 0.99:
-        return max(base, 3600.0)
+        return max(base, 900.0)   # 15 min — then try magnet link
     if progress >= 0.95:
-        return max(base, 1800.0)
+        return max(base, 1800.0)  # 30 min — pieces may still be findable
     if progress >= 0.90:
-        return max(base, 1200.0)
+        return max(base, 1200.0)  # 20 min
     return base
 
 
@@ -208,15 +209,18 @@ class TorrentClient:
                 )
 
             # Periodically force re-announce when stalled to find new peers.
-            if stalled_s > announce_interval and now - last_reannounce > announce_interval:
+            # At 99%+ re-announce every 2 min to discover rare-piece seeders.
+            reannounce_gap = 120 if progress >= 0.99 else announce_interval
+            if stalled_s > reannounce_gap and now - last_reannounce > reannounce_gap:
                 last_reannounce = now
                 try:
                     handle.force_reannounce()
                     logger.info(
-                        "[%s] Force re-announce (stalled %.0fs, peers=%d)",
+                        "[%s] Force re-announce (stalled %.0fs, peers=%d, progress=%.1f%%)",
                         release_identifier[:40],
                         stalled_s,
                         status.num_peers,
+                        progress * 100,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -323,13 +327,19 @@ class TorrentClient:
             raise TorrentDownloadError("Neither torrent URL nor magnet link provided")
 
         # --- Finalization ----------------------------------------------------
-        # Give libtorrent a moment to finalize/rename files.
-        for _ in range(30):
+        # Give libtorrent a moment to flush its write cache to disk before we
+        # remove the handle.  Without this, remove_torrent() can drop pieces
+        # that haven't been flushed yet — causing a 99.9% "completed" download
+        # to suddenly lose data.
+        for _wait in range(60):
             if target_path.exists() and target_path.stat().st_size > 0:
                 break
             time.sleep(1.0)
-        # Keep the payload on disk (default remove flags); caller decides
-        # whether it becomes the next seed base or is deleted.
+        # Flush any remaining write-cache entries (best-effort, non-blocking).
+        try:
+            self._session.wait_for_alert(-1)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
         self._session.remove_torrent(handle)
 
         if not target_path.exists():

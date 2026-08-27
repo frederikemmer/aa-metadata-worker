@@ -53,6 +53,7 @@ class SearchResponse(BaseModel):
 class RecordSourcesResponse(BaseModel):
     md5: str
     aaPageUrl: str
+    fastDownloadUrl: str | None = None
     ipfsCid: str | None = None
     source: SourceInfo
     note: str = "Reference information only. This service does not host or proxy book files."

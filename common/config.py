@@ -44,15 +44,15 @@ class Settings:
     api_key: str = ""
     api_statement_timeout_ms: int = 5000
 
+    # Anna's Archive fast-download (membership key for /dyn/api/fast_download.json)
+    aa_fast_download_key: str = ""
+
     # Sync / collections. Order = processing order; the big upload_records
-    # download deliberately runs last so small enrichment collections first.
+    # download deliberately runs last.  Only collections whose MD5s work
+    # with Anna's Archive fast_download.json are active.
     aa_collections: list[str] = field(
         default_factory=lambda: [
             "zlib3_records",
-            "ia2_records",
-            "goodreads_records",
-            "gbooks_records",
-            "libby_records",
             "upload_records",
         ]
     )
@@ -114,13 +114,10 @@ def load_settings() -> Settings:
         api_port=_env_int("API_PORT", 8010),
         api_key=os.environ.get("METADATA_API_KEY", ""),
         api_statement_timeout_ms=_env_int("API_STATEMENT_TIMEOUT_MS", 5000),
+        aa_fast_download_key=os.environ.get("AA_FAST_DOWNLOAD_KEY", ""),
         aa_collections=collections
         or [
             "zlib3_records",
-            "ia2_records",
-            "goodreads_records",
-            "gbooks_records",
-            "libby_records",
             "upload_records",
         ],
         aa_mirror_base_url=os.environ.get("AA_MIRROR_BASE_URL", "https://annas-archive.gd"),

@@ -55,12 +55,15 @@ services:
       API_STATEMENT_TIMEOUT_MS: "20000"          # COUNT(*) auf 24 Mio+ Rows braucht >10 s
 
       # Welche Collections importiert werden. Reihenfolge = Verarbeitungsreihenfolge:
-      # Bücher zuerst, die große upload_records-Download (136 GiB) bewusst zuletzt,
-      # damit die kleinen Anreicherungs-Quellen nicht dahinter warten müssen.
-      # goodreads/gbooks/libby sind reine Anreicherungs-Metadaten (ohne Download-
-      # Referenzen); sie verbessern Suche/Matching über ISBNs.
-      AA_COLLECTIONS: zlib3_records,ia2_records,goodreads_records,gbooks_records,libby_records,upload_records
+      # Nur Quellen deren MD5 mit Anna's Archive fast_download API funktioniert.
+      # ia2/gbooks/libby nutzen Datei-Checksummen (kein AA-Mirror) → kein Download-Link.
+      # upload_records (136 GiB) bewusst zuletzt.
+      AA_COLLECTIONS: zlib3_records,upload_records
       AA_MIRROR_BASE_URL: https://annas-archive.gd
+
+      # Anna's Archive Membership-Key für fast_download API (optional).
+      # Ohne Key wird kein fastDownloadUrl in /sources zurückgegeben.
+      AA_FAST_DOWNLOAD_KEY:
 
       # Nicht-Buch-Subcollections aus upload_records werden verworfen:
       AA_UPLOAD_BLOCKED_SUBCOLLECTIONS: academia_edu,us_gov_tech_reports,wikilib,aaaaarg,magzdb

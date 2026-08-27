@@ -161,6 +161,63 @@ class TestSourcesEndpoint:
         body = response.json()
         assert body["aaPageUrl"].endswith("/md5/" + "ab" * 16)
         assert "download" not in body["aaPageUrl"]
+        # Without AA_FAST_DOWNLOAD_KEY configured, fastDownloadUrl is null
+        assert body["fastDownloadUrl"] is None
+
+    def test_fast_download_url_when_key_configured(self, client, monkeypatch):
+        monkeypatch.setenv("AA_FAST_DOWNLOAD_KEY", "test-key-123")
+        close_pool()
+        app = create_app()
+        with TestClient(app) as tc:
+            response = tc.get("/api/v1/records/" + "ab" * 16 + "/sources")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["fastDownloadUrl"] is not None
+            assert "fast_download.json" in body["fastDownloadUrl"]
+            assert "md5=" in body["fastDownloadUrl"]
+            assert "key=test-key-123" in body["fastDownloadUrl"]
+        monkeypatch.delenv("AA_FAST_DOWNLOAD_KEY")
+        close_pool()
+
+    def test_fast_download_url_null_for_non_downloadable_collection(self, db_conn, monkeypatch):
+        """ia2_records never get a fast_download URL even with a key."""
+        from sync.importer import import_release
+        from tests.conftest import make_zst
+
+        ia_book = {
+            "aacid": "aacid__ia2_records__20250101T000000Z__test",
+            "metadata": {
+                "ia_id": "test_ia_item",
+                "metadata_json": {
+                    "metadata": {
+                        "title": "IA Test Book",
+                        "creator": "Test Author",
+                        "mediatype": "texts",
+                    },
+                    "aa_shorter_files": [
+                        {"name": "test.pdf", "size": 1000, "md5": "ef" * 16},
+                    ],
+                },
+            },
+        }
+        release_id = db_conn.execute(
+            "INSERT INTO sync_releases (collection, release_identifier) "
+            "VALUES ('ia2_records', 'ia_test') RETURNING id"
+        ).fetchone()[0]
+        payload = make_zst([ia_book], __import__("pathlib").Path("/tmp/opencode/ia_test.zst"))
+        import_release(db_conn, "ia2_records", payload, release_id)
+
+        monkeypatch.setenv("AA_FAST_DOWNLOAD_KEY", "test-key-123")
+        close_pool()
+        app = create_app()
+        with TestClient(app) as tc:
+            response = tc.get("/api/v1/records/" + "ef" * 16 + "/sources")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["fastDownloadUrl"] is None
+            assert body["source"]["collection"] == "ia2_records"
+        monkeypatch.delenv("AA_FAST_DOWNLOAD_KEY")
+        close_pool()
 
     def test_deleted_record_gone(self, client, db_conn):
         db_conn.execute(
