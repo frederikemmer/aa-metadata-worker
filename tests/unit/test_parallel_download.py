@@ -221,6 +221,12 @@ class TestParallelismConfig:
         s = Settings()
         assert s.sync_max_downloads == 4
 
+    def test_checking_grace_default_is_120(self):
+        from common.config import Settings
+
+        s = Settings()
+        assert s.sync_checking_grace_min == 120
+
     def test_zero_falls_back_to_sequential(self):
         """max_downloads=0 should not crash ThreadPoolExecutor."""
         from common.config import Settings

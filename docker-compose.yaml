@@ -83,6 +83,10 @@ services:
       SYNC_BATCH_SIZE: "20000"
       SYNC_ERROR_ABORT_RATE: "0.02"              # Import abbrechen ab 2 % Fehlerrate
       SYNC_MAX_DOWNLOADS: "4"                    # Parallele Torrent-Downloads
+      # Wie lange ein libtorrent "checking"-Zustand als Aktivität zählt, bevor
+      # der Stall-Timeout greift. Beim Resume wird der große Seed-Base (z. B.
+      # 24 GiB zlib3) neu gehasht — das darf nicht als "Stall" abgebrochen werden.
+      SYNC_CHECKING_GRACE_MIN: "120"             # Minuten (Default 120)
 
       # Storage-Budget (GiB): Warnung / harter Stopp für Downloads+Imports
       STORAGE_WARN_GIB: "300"

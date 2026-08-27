@@ -99,7 +99,11 @@ def _download_one(
     client: TorrentClient | None = None
     try:
         conn = connect(settings)
-        client = TorrentClient(work_dir, listen_port=listen_port)
+        client = TorrentClient(
+            work_dir,
+            listen_port=listen_port,
+            checking_grace_s=settings.sync_checking_grace_min * 60,
+        )
 
         seed_base = (
             _prev_payload_path(work_dir, collection)
@@ -237,7 +241,10 @@ def _download_sequential(
             try:
                 state.set_release_status(conn, release_id, "downloading", reset_counters=True)
                 if client is None:
-                    client = TorrentClient(work_dir)
+                    client = TorrentClient(
+                        work_dir,
+                        checking_grace_s=settings.sync_checking_grace_min * 60,
+                    )
 
                 seed_base = (
                     _prev_payload_path(work_dir, collection)

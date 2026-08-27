@@ -71,7 +71,14 @@ def _adaptive_stall_timeout(progress: float, base: float = 900.0) -> float:
 class TorrentClient:
     """Downloads one .jsonl.seekable.zst file into `download_dir` at a time."""
 
-    def __init__(self, download_dir: str | Path, *, listen_port: int = 6881):
+    def __init__(
+        self,
+        download_dir: str | Path,
+        *,
+        listen_port: int = 6881,
+        checking_grace_s: float = 7200.0,
+    ):
+        self.checking_grace_s = checking_grace_s
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -173,10 +180,12 @@ class TorrentClient:
             progress = status.progress
 
             now = time.monotonic()
-            # While checking existing data, verification progress counts as activity.
-            # BUT only for a bounded window: if libtorrent is stuck in a checking
-            # state (e.g. constant re-check of a partial seed base), we must still
-            # time out.  Cap the "checking counts as activity" grace to 10 min.
+            # While checking existing data, verification progress counts as
+            # activity. BUT only for a bounded window: if libtorrent is stuck in
+            # a checking state (e.g. constant re-check of a partial seed base)
+            # we must eventually time it out.  The grace period is generous
+            # (`sync_checking_grace_min`, default 120 min) so that a legitimate
+            # long re-hash-check of a large seed base is never cut short.
             checking = (
                 str(status.state)
                 in (
@@ -191,9 +200,9 @@ class TorrentClient:
                 last_progress_change = now
                 last_check_start = now
             elif checking:
-                # Only treat re-checking as activity for the first 10 minutes.
+                # Only treat re-checking as activity up to the configured grace.
                 # After that, a stuck check must not bypass the stall timeout.
-                if now - last_check_start > 600:
+                if now - last_check_start > self.checking_grace_s:
                     pass  # do not reset last_progress_change — let stall fire
                 else:
                     last_progress_change = now
