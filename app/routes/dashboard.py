@@ -32,13 +32,14 @@ SELECT collection, release_identifier, status, data_size_bytes,
        records_skipped, records_discarded, records_failed,
        error_message, discard_reasons, discard_samples,
        CASE
-         WHEN import_started_at IS NULL THEN NULL
+         WHEN COALESCE(import_started_at, started_at) IS NULL THEN NULL
          WHEN status IN ('importing', 'validating')
-           THEN EXTRACT(EPOCH FROM (now() - import_started_at))::bigint
+           THEN EXTRACT(EPOCH FROM (now() - COALESCE(import_started_at, started_at)))::bigint
          WHEN completed_at IS NOT NULL
-           THEN EXTRACT(EPOCH FROM (completed_at - import_started_at))::bigint
+           THEN EXTRACT(EPOCH FROM (completed_at - COALESCE(import_started_at, started_at)))::bigint
          ELSE NULL
        END AS import_duration_seconds,
+       (import_started_at IS NULL AND started_at IS NOT NULL) AS import_timing_estimated,
        to_char(started_at, 'YYYY-MM-DD HH24:MI:SS') AS started,
        to_char(import_started_at, 'YYYY-MM-DD HH24:MI:SS') AS import_started,
        to_char(completed_at, 'YYYY-MM-DD HH24:MI:SS') AS completed
@@ -186,6 +187,7 @@ _COLUMNS = (
     "discard_reasons",
     "discard_samples",
     "import_duration_seconds",
+    "import_timing_estimated",
     "started",
     "import_started",
     "completed",
@@ -213,6 +215,7 @@ def _row_to_release(row: tuple) -> dict:
         "discardReasons": data["discard_reasons"],
         "discardSamples": data["discard_samples"],
         "importDurationSeconds": data["import_duration_seconds"],
+        "importTimingEstimated": data["import_timing_estimated"],
         "startedAt": data["started"],
         "importStartedAt": data["import_started"],
         "completedAt": data["completed"],

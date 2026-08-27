@@ -497,6 +497,8 @@ Polling nie auf einen vollständigen `COUNT(*)`-Scan wartet.
 
 Ab Schema v8 enthalten Releases außerdem `importStartedAt`,
 `importDurationSeconds`, `discardReasons` und bounded `discardSamples`.
+Für ältere laufende Releases ohne `importStartedAt` basiert die Dauer auf
+`startedAt` und wird mit `importTimingEstimated=true` gekennzeichnet.
 Top-Level `discardAnalysis` aggregiert die Filtergründe über die aktiven
 Collections; je Grund werden höchstens drei kompakte Beispiele ausgegeben.
 

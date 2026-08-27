@@ -110,6 +110,7 @@ class TestSyncStatusJson:
         body = client.get("/api/v1/sync/status").json()
         release = next(r for r in body["recentReleases"] if r["releaseIdentifier"] == "analytics")
         assert release["importDurationSeconds"] >= 9
+        assert release["importTimingEstimated"] is False
         assert release["importStartedAt"] is not None
         assert release["discardReasons"] == {"missing_title_or_author": 700}
         assert body["discardAnalysis"] == [

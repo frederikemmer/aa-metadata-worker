@@ -447,8 +447,8 @@ function renderPerformance(d){
           <div class="small">Messung beginnt mit dem nächsten Import-Start.</div></div>`;
       }
       return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
-        <div class="big">${fmt(Math.round(m.recordsPerSecond))} Records/s</div>
-        <div class="small">${scaleBytes(m.bytesPerSecond)}/s · Laufzeit ${fmtDuration(m.seconds)} · ETA ${fmtEta(m.etaSeconds)}</div></div>`;
+        <div class="big">${r.importTimingEstimated?'≈ ':''}${fmt(Math.round(m.recordsPerSecond))} Records/s</div>
+        <div class="small">${scaleBytes(m.bytesPerSecond)}/s · Laufzeit ${fmtDuration(m.seconds)} · ETA ${fmtEta(m.etaSeconds)}${r.importTimingEstimated?' · Schätzung ab Laufstart':''}</div></div>`;
     }).join('') + '</div>';
   }
   if(history.length){
@@ -457,8 +457,8 @@ function renderPerformance(d){
       history.map(r=>{
         const m = importMetrics(r);
         return `<tr><td><b>${escapeHtml(r.collection)}</b><div class="small">${escapeHtml(trunc(r.releaseIdentifier,42))}</div></td>
-          <td>${pill(r.status)}</td><td class="num">${fmtDuration(m.seconds)}</td>
-          <td class="num">${fmt(Math.round(m.recordsPerSecond))}</td>
+          <td>${pill(r.status)}</td><td class="num">${r.importTimingEstimated?'≈ ':''}${fmtDuration(m.seconds)}</td>
+          <td class="num">${r.importTimingEstimated?'≈ ':''}${fmt(Math.round(m.recordsPerSecond))}</td>
           <td class="num">${scaleBytes(m.bytesPerSecond)}/s</td></tr>`;
       }).join('') + '</tbody></table>';
   }
