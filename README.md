@@ -73,7 +73,7 @@ docker compose up -d
 |---|---|---|
 | `POSTGRES_*` | – | DB-Zugang (nur intern; Passwort in allen 3 Services gleich) |
 | `METADATA_API_KEY` | leer | Optionaler Bearer-Schutz für Daten-Endpoints (Dashboard bleibt offen) |
-| `AA_COLLECTIONS` | `zlib3_records,ia2_records,goodreads_records,gbooks_records,libby_records,upload_records` | Zu importierende Collections |
+| `AA_COLLECTIONS` | `zlib3_records,upload_records` | Aktive Buchquellen im Suchindex |
 | `AA_UPLOAD_BLOCKED_SUBCOLLECTIONS` | `academia_edu,us_gov_tech_reports,wikilib,aaaaarg,magzdb` | upload_records-Subcollections, die beim Import verworfen werden |
 | `AA_UPLOAD_REQUIRE_TITLE_AUTHOR` | `true` | upload-Datensätze ohne echten Titel+Autor verwerfen |
 | `AA_IA_REQUIRE_TEXTS` | `true` | Nur IA-Items mit mediatype „texts“ (Bücher/Scans) |
@@ -227,6 +227,16 @@ Die Datenbank ist vollständig aus den öffentlichen AA-Releases rekonstruierbar
 * **Kein lokales Full-DB-Backup** auf derselben Disk (würde Budget sprengen).
 * Optionales externes Backup: `pg_dump -Fc` auf ein separates Ziel
   (siehe docs/architecture.md, Abschnitt Backup/Restore).
+
+Nicht mehr aktive Quellen lassen sich kontrolliert aus dem Suchindex entfernen.
+Der Befehl sperrt parallele Syncs, schreibt vor dem Löschen komprimierte
+Binary-COPY-Backups nach `/work/sync/backup` und bereinigt auch die zugehörige
+Release-Historie:
+
+```bash
+docker compose run --rm api python -m sync.cli purge-sources \
+  --keep zlib3_records,upload_records --yes
+```
 
 ## 13. Restore / Rebuild
 

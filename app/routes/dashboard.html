@@ -44,6 +44,7 @@
   button.primary{background:#1d3a5f;border-color:#2f5a94}
   button.warn{background:#4a2323;border-color:#7a3535}
   button:disabled{opacity:.45;cursor:not-allowed}
+  button.mode-btn{padding:4px 10px;font-size:12px}
   .keybox{margin-left:auto;display:flex;gap:6px;align-items:center}
   input{background:#10151b;border:1px solid var(--line);color:var(--text);border-radius:6px;
         padding:6px 8px;font-size:12px;width:170px}
@@ -107,7 +108,7 @@
   <h2>Collections</h2>
   <table id="colls"><thead><tr>
     <th>Collection</th><th>Status</th><th class="num">Records (neu/aktualisiert)</th>
-    <th class="num">Verworfen</th><th class="num">Fehler</th><th>Fertig am</th>
+    <th class="num">Verworfen</th><th class="num">Fehler</th><th>Fertig am</th><th>Modus</th>
   </tr></thead><tbody></tbody></table>
 </section>
 
@@ -251,6 +252,26 @@ async function sendCommand(action){
   }catch(e){ toast('Netzwerkfehler', false); }
 }
 
+async function toggleMode(collection, mode){
+  const target = mode==='import' ? 'Import' : 'Auto';
+  if(!confirm(`${collection}: Sync-Modus auf '${target}' umstellen?\n\n` +
+    (mode==='import'
+      ? 'Import-Modus: Aus lokaler Payload importieren; Updates werden weiter als Delta geladen.'
+      : 'Auto-Modus: Immer komplett downloaden (inkrementell) und importieren.'))){
+    return;
+  }
+  try{
+    const r = await fetch(`/api/v1/sync/collections/${encodeURIComponent(collection)}/mode`, {
+      method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
+      body: JSON.stringify({mode})
+    });
+    if(r.status===401){ toast('Falscher/fehlender API-Key (unten eintragen).', false); return; }
+    if(!r.ok){ const e = await r.json().catch(()=>({})); toast(e.detail||'Fehler', false); return; }
+    toast(`${collection}: Modus → ${target}`);
+    tick();
+  }catch(e){ toast('Netzwerkfehler', false); }
+}
+
 document.getElementById('btn-run').onclick = () => {
   if(confirm('Jetzt einen Sync-Lauf starten? Es werden neue Metadaten-Torrents heruntergeladen und importiert.'))
     sendCommand('run_now');
@@ -311,7 +332,7 @@ function render(d){
              <div class="small">Download: ${gib(a.downloadDoneBytes)} / ${gib(a.downloadTotalBytes)} (${p.toFixed(1)}%)</div>
              ${trackDownload(a)}`;
       }
-      if(a.importTotalBytes>0 && a.status!=='downloading'){
+      if(a.importTotalBytes>0){
         const ip=a.importTotalBytes>0?Math.min(100,a.importDoneBytes/a.importTotalBytes*100):0;
         bar+=`<div class="bar" style="margin-top:10px"><div style="width:${ip}%;background:var(--ok)"></div></div>
               <div class="small">Import: ${gib(a.importDoneBytes)} / ${gib(a.importTotalBytes)} (${ip.toFixed(1)}%)</div>`;
@@ -337,7 +358,14 @@ function render(d){
     <td class="num">${fmt(c.recordsInserted)} / ${fmt(c.recordsUpdated)}</td>
     <td class="num">${fmt(c.recordsDiscarded)}</td>
     <td class="num">${fmt(c.recordsFailed)}</td>
-    <td class="small">${c.completedAt||'–'}</td></tr>`).join('');
+    <td class="small">${c.completedAt||'–'}</td>
+    <td>
+      <button class="mode-btn ${c.mode==='import'?'primary':''}"
+              onclick="toggleMode('${c.collection}','${c.mode==='import'?'auto':'import'}')"
+              title="Zwischen Auto (Download) und Import umschalten">
+        ${c.mode==='import' ? 'Import' : 'Auto'}
+      </button>
+    </td></tr>`).join('');
 
   document.querySelector('#recent tbody').innerHTML = d.recentReleases.map(r=>`
     <tr><td>${r.collection}</td><td class="small">${trunc(r.releaseIdentifier?.replace('annas_archive_meta__aacid__',''),40)}</td>
@@ -399,7 +427,8 @@ async function doSearch(reset=true){
     params.set(field, searchQuery);
     params.set('limit', '20');
     if(!reset && searchCursor) params.set('cursor', searchCursor);
-    const r = await fetch('/api/v1/search?'+params.toString());
+    const r = await fetch('/api/v1/search?'+params.toString(), {headers: authHeaders()});
+    if(r.status===401){ toast('Falscher/fehlender API-Key (unten eintragen).', false); return; }
     if(!r.ok){
       const e = await r.json().catch(()=>({}));
       document.getElementById('search-results').innerHTML=

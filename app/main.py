@@ -143,7 +143,6 @@ def create_app() -> FastAPI:
             path.startswith("/api/v1/health")
             or path == "/api/v1/sync/status"  # read-only progress data for the dashboard
             or path == "/api/v1/sync/control"  # read-only control state for the dashboard
-            or path == "/api/v1/search"  # read-only search for the dashboard
             or path in ("/", "/dashboard", "/openapi.json", "/docs", "/redoc")
             or path.startswith("/docs/")
         )

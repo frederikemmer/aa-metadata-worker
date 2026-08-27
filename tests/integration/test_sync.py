@@ -190,7 +190,7 @@ class FakeTorrentClient:
 
     payloads: dict[str, list[str]] = {}
 
-    def __init__(self, download_dir):
+    def __init__(self, download_dir, **_kwargs):
         self.download_dir = Path(download_dir)
 
     def download(self, release_identifier, torrent_url, magnet_link="", on_progress=None, seed_base=None):

@@ -10,6 +10,7 @@ Usage (inside the sync container or a local venv):
   python -m sync.cli retry <release_id>
   python -m sync.cli storage-report
   python -m sync.cli db-stats
+  python -m sync.cli purge-sources [--keep a,b] [--yes]
   python -m sync.cli worker
 """
 
@@ -223,6 +224,128 @@ def apply_migrations_if_needed(conn) -> None:
     apply_migrations(conn)
 
 
+def cmd_purge_sources(args: argparse.Namespace) -> int:
+    """Back up and remove every source collection not listed in ``--keep``.
+
+    The sync advisory lock prevents an import from racing the backup/delete.
+    PostgreSQL binary COPY backups are written for records and release history
+    before anything is deleted.
+    """
+    import gzip
+    import time as _time
+
+    from sync import state
+
+    keep = [c.strip() for c in (args.keep or "").split(",") if c.strip()]
+    if not keep:
+        print("No --keep collections given; refusing to purge everything.", file=sys.stderr)
+        return 2
+
+    work_dir = _work_dir()
+    backup_dir = work_dir / "backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = connect()
+    lock_acquired = False
+    try:
+        apply_migrations_if_needed(conn)
+        lock_acquired = state.acquire_sync_lock(conn)
+        if not lock_acquired:
+            print(
+                "Another sync/import is active; refusing to purge while data is changing.",
+                file=sys.stderr,
+            )
+            return 3
+
+        rows = conn.execute(
+            "SELECT source_collection, COUNT(*) FROM metadata_records "
+            "WHERE source_collection <> ALL(%s) GROUP BY 1 ORDER BY 2 DESC",
+            (keep,),
+        ).fetchall()
+        total = sum(int(r[1]) for r in rows)
+        db_size_now = state.database_size_bytes(conn) / GIB
+        print(f"keep sources: {keep}")
+        print(f"to purge ({total:,} records):")
+        for name, count in rows:
+            print(f"  {name:<24}{int(count):>13,}")
+        print(f"db size now: {db_size_now:.2f} GiB")
+        if total == 0:
+            print("Nothing to purge.")
+            return 0
+
+        if not args.yes:
+            answer = input(
+                f"Export {total:,} records to {backup_dir} then DELETE from "
+                "metadata_records? Type 'yes' to continue: "
+            ).strip().lower()
+            if answer != "yes":
+                print("Aborted.")
+                return 0
+
+        stamp = _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
+        backup_specs = (
+            (
+                "metadata_records",
+                "COPY (SELECT * FROM metadata_records "
+                "WHERE source_collection <> ALL(%s)) TO STDOUT WITH (FORMAT binary)",
+            ),
+            (
+                "sync_releases",
+                "COPY (SELECT * FROM sync_releases "
+                "WHERE collection <> ALL(%s)) TO STDOUT WITH (FORMAT binary)",
+            ),
+            (
+                "collection_sync_modes",
+                "COPY (SELECT * FROM collection_sync_modes "
+                "WHERE collection <> ALL(%s)) TO STDOUT WITH (FORMAT binary)",
+            ),
+        )
+        for table, copy_sql in backup_specs:
+            backup_path = backup_dir / f"{table}_purged_{stamp}.bin.gz"
+            with gzip.open(backup_path, "wb") as out:
+                with conn.cursor().copy(copy_sql, params=(keep,)) as copy:
+                    while chunk := copy.read():
+                        out.write(chunk)
+            backup_size = backup_path.stat().st_size / GIB
+            print(f"Backup written: {backup_path} ({backup_size:.2f} GiB)")
+
+        with conn.transaction():
+            deleted_records = conn.execute(
+                "DELETE FROM metadata_records WHERE source_collection <> ALL(%s)",
+                (keep,),
+            ).rowcount
+            deleted_releases = conn.execute(
+                "DELETE FROM sync_releases WHERE collection <> ALL(%s)", (keep,)
+            ).rowcount
+            deleted_modes = conn.execute(
+                "DELETE FROM collection_sync_modes WHERE collection <> ALL(%s)",
+                (keep,),
+            ).rowcount
+        print(
+            f"Deleted {deleted_records:,} records, {deleted_releases:,} release rows "
+            f"and {deleted_modes:,} collection-mode rows."
+        )
+        print("VACUUM (ANALYZE) metadata_records (space becomes reusable):")
+        conn.execute("VACUUM (ANALYZE) metadata_records")
+        remaining = conn.execute(
+            "SELECT source_collection, COUNT(*) FROM metadata_records "
+            "GROUP BY 1 ORDER BY 1"
+        ).fetchall()
+        unexpected = [row for row in remaining if row[0] not in keep]
+        if unexpected:
+            raise RuntimeError(f"Purge verification failed; unexpected sources remain: {unexpected}")
+        print("remaining sources:")
+        for name, count in remaining:
+            print(f"  {name:<24}{int(count):>13,}")
+        db_size_after = state.database_size_bytes(conn) / GIB
+        print(f"db size after vacuum: {db_size_after:.2f} GiB")
+    finally:
+        if lock_acquired:
+            state.release_sync_lock(conn)
+        conn.close()
+    return 0
+
+
 def cmd_db_stats(_args: argparse.Namespace) -> int:
     conn = connect()
     try:
@@ -306,6 +429,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_dbstats = sub.add_parser("db-stats", help="Record counts by collection/format")
     p_dbstats.set_defaults(func=cmd_db_stats)
+
+    p_purge = sub.add_parser(
+        "purge-sources",
+        help="Backup + delete records from source collections not in --keep",
+    )
+    p_purge.add_argument(
+        "--keep", default="zlib3_records,upload_records",
+        help="Comma separated collections to keep (default: zlib3_records,upload_records)",
+    )
+    p_purge.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+    p_purge.set_defaults(func=cmd_purge_sources)
 
     p_worker = sub.add_parser("worker", help="Run the scheduled sync worker loop")
     p_worker.set_defaults(func=cmd_worker)

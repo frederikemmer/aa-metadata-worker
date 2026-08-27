@@ -179,7 +179,9 @@ class TestSourcesEndpoint:
         monkeypatch.delenv("AA_FAST_DOWNLOAD_KEY")
         close_pool()
 
-    def test_fast_download_url_null_for_non_downloadable_collection(self, db_conn, monkeypatch):
+    def test_fast_download_url_null_for_non_downloadable_collection(
+        self, db_conn, monkeypatch, tmp_path
+    ):
         """ia2_records never get a fast_download URL even with a key."""
         from sync.importer import import_release
         from tests.conftest import make_zst
@@ -204,7 +206,7 @@ class TestSourcesEndpoint:
             "INSERT INTO sync_releases (collection, release_identifier) "
             "VALUES ('ia2_records', 'ia_test') RETURNING id"
         ).fetchone()[0]
-        payload = make_zst([ia_book], __import__("pathlib").Path("/tmp/opencode/ia_test.zst"))
+        payload = make_zst([ia_book], tmp_path / "ia_test.zst")
         import_release(db_conn, "ia2_records", payload, release_id)
 
         monkeypatch.setenv("AA_FAST_DOWNLOAD_KEY", "test-key-123")

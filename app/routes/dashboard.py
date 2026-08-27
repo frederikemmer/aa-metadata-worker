@@ -42,11 +42,20 @@ def sync_status(
     conn: psycopg.Connection = GetConnectionDependency,
     settings: Settings = GetSettingsDependency,
 ) -> dict:
+    active_collections = settings.aa_collections
     active_rows = conn.execute(
         f"{_RELEASE_SUMMARY_SQL} WHERE status IN ('downloading','importing','validating') "
-        "ORDER BY started_at DESC NULLS LAST LIMIT 1"
+        "AND collection = ANY(%s) ORDER BY started_at DESC NULLS LAST LIMIT 1",
+        (active_collections,),
     ).fetchall()
     active = _row_to_release(active_rows[0]) if active_rows else None
+
+    modes = {
+        (m[0]): m
+        for m in conn.execute(
+            "SELECT collection, mode, last_imported_identifier FROM collection_sync_modes"
+        ).fetchall()
+    }
 
     collections = []
     for name in settings.aa_collections:
@@ -58,12 +67,20 @@ def sync_status(
             entry = _row_to_release(rows[0])
         else:
             entry = {"collection": name, "status": "not_discovered"}
+        mode_row = modes.get(name)
+        entry["mode"] = mode_row[1] if mode_row else "auto"
+        entry["lastImportedIdentifier"] = mode_row[2] if mode_row else None
         collections.append(entry)
 
-    recent_rows = conn.execute(f"{_RELEASE_SUMMARY_SQL} ORDER BY discovered_at DESC LIMIT 12").fetchall()
+    recent_rows = conn.execute(
+        f"{_RELEASE_SUMMARY_SQL} WHERE collection = ANY(%s) "
+        "ORDER BY discovered_at DESC LIMIT 12",
+        (active_collections,),
+    ).fetchall()
     totals_row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(records_discarded), 0), COALESCE(SUM(records_failed), 0) "
-        "FROM sync_releases"
+        "FROM sync_releases WHERE collection = ANY(%s)",
+        (active_collections,),
     ).fetchone()
     records_row = approx_count(conn, "metadata_records")
     db_size_row = conn.execute("SELECT pg_database_size(current_database())").fetchone()
@@ -78,7 +95,7 @@ def sync_status(
     except OSError:
         disk_free = 0
 
-    assert records_row and db_size_row and version_row and totals_row and last_sync_row
+    assert db_size_row and version_row and totals_row and last_sync_row
     migrations = list_migrations()
     ready = bool(migrations) and int(version_row[0]) >= migrations[-1][0]
 

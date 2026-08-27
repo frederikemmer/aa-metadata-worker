@@ -87,6 +87,7 @@ def _download_one(
     work_dir: Path,
     settings: Settings,
     listen_port: int = 6881,
+    stall_at_99_s: int | None = None,
 ) -> tuple[str, Path | None, Exception | None, bool]:
     """Download a single collection in its own thread.
 
@@ -103,7 +104,11 @@ def _download_one(
             work_dir,
             listen_port=listen_port,
             checking_grace_s=settings.sync_checking_grace_min * 60,
-            stall_at_99_s=settings.sync_stall_at_99_min * 60,
+            stall_at_99_s=(
+                stall_at_99_s
+                if stall_at_99_s is not None
+                else settings.sync_stall_at_99_min * 60
+            ),
         )
 
         seed_base = (
@@ -182,6 +187,7 @@ def _import_payload(
         state.set_release_status(
             conn, release_id, "completed", f"imported{status_note}"
         )
+        state.record_imported_release(conn, collection, release.identifier)
         state.update_download_progress(
             conn, release_id, payload_path.stat().st_size, payload_path.stat().st_size
         )
@@ -232,6 +238,7 @@ def _download_sequential(
     work_dir: Path,
     settings: Settings,
     summary: SyncRunSummary,
+    stall_at_99_s: int | None = None,
 ) -> None:
     """Download collections one-by-one, importing each right after it finishes."""
     client: TorrentClient | None = None
@@ -245,7 +252,11 @@ def _download_sequential(
                     client = TorrentClient(
                         work_dir,
                         checking_grace_s=settings.sync_checking_grace_min * 60,
-                        stall_at_99_s=settings.sync_stall_at_99_min * 60,
+                        stall_at_99_s=(
+                            stall_at_99_s
+                            if stall_at_99_s is not None
+                            else settings.sync_stall_at_99_min * 60
+                        ),
                     )
 
                 seed_base = (
@@ -345,6 +356,7 @@ def run_sync(
             # -- Phase 1: Discovery, skip completed, storage guard -----------
 
             to_download: dict[str, dict] = {}
+            modes = state.get_collection_modes(conn)
 
             for collection in wanted_collections:
                 release = releases.get(collection)
@@ -395,6 +407,23 @@ def run_sync(
 
             max_dl = settings.sync_max_downloads
 
+            # Effective >=99% stall timeout per collection: collections in
+            # 'import' mode fall back to a resilient import much sooner so a
+            # stuck download does not block freshness for minutes on end.
+            import_stall = settings.sync_import_stall_min * 60
+
+            def _stall_for(collection: str) -> int | None:
+                mode = modes.get(collection)
+                if mode is not None and mode.mode == "import":
+                    return import_stall
+                return None
+
+            any_import_mode = any(
+                modes.get(c) is not None and modes[c].mode == "import"
+                for c in to_download
+            )
+            all_stall_s = import_stall if any_import_mode else None
+
             if max_dl > 1 and len(to_download) > 1:
                 logger.info(
                     "Downloading %d collections in parallel (max_workers=%d).",
@@ -415,6 +444,7 @@ def run_sync(
                             work_dir,
                             settings,
                             listen_port=6881 + idx,
+                            stall_at_99_s=_stall_for(collection),
                         )
                         futures[future] = collection
 
@@ -451,7 +481,9 @@ def run_sync(
                             )
             else:
                 logger.info("Downloading %d collections sequentially.", len(to_download))
-                _download_sequential(conn, to_download, work_dir, settings, summary)
+                _download_sequential(
+                    conn, to_download, work_dir, settings, summary, stall_at_99_s=all_stall_s
+                )
         finally:
             state.release_sync_lock(conn)
     finally:

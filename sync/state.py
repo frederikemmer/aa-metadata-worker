@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import psycopg
 
 # Stable advisory-lock key so concurrent syncs (e.g. worker + manual CLI)
@@ -222,6 +224,69 @@ def find_release(conn: psycopg.Connection, release_id: int) -> dict | None:
         return None
     keys = ("id", "collection", "release_identifier", "status")
     return dict(zip(keys, row, strict=True))
+
+
+@dataclass
+class CollectionMode:
+    """Per-collection sync mode + which release the local payload corresponds to."""
+
+    collection: str
+    mode: str = "auto"  # 'auto' | 'import'
+    last_imported_identifier: str | None = None
+
+
+def get_collection_mode(conn: psycopg.Connection, collection: str) -> CollectionMode:
+    """Read one collection mode, defaulting to ``auto`` when no row exists."""
+    row = conn.execute(
+        "SELECT collection, mode, last_imported_identifier "
+        "FROM collection_sync_modes WHERE collection = %s",
+        (collection,),
+    ).fetchone()
+    if row is None:
+        return CollectionMode(collection=collection, mode="auto")
+    return CollectionMode(collection=row[0], mode=row[1], last_imported_identifier=row[2])
+
+
+def get_collection_modes(conn: psycopg.Connection) -> dict[str, CollectionMode]:
+    """Return all explicitly configured collection modes."""
+    rows = conn.execute(
+        "SELECT collection, mode, last_imported_identifier FROM collection_sync_modes"
+    ).fetchall()
+    return {
+        row[0]: CollectionMode(
+            collection=row[0], mode=row[1], last_imported_identifier=row[2]
+        )
+        for row in rows
+    }
+
+
+def set_collection_mode(
+    conn: psycopg.Connection, collection: str, mode: str
+) -> None:
+    assert mode in ("auto", "import")
+    conn.execute(
+        """
+        INSERT INTO collection_sync_modes (collection, mode, updated_at)
+        VALUES (%s, %s, now())
+        ON CONFLICT (collection) DO UPDATE SET mode = EXCLUDED.mode, updated_at = now()
+        """,
+        (collection, mode),
+    )
+
+
+def record_imported_release(
+    conn: psycopg.Connection, collection: str, release_identifier: str
+) -> None:
+    """Remember that the local .prev payload now corresponds to this release."""
+    conn.execute(
+        """
+        INSERT INTO collection_sync_modes (collection, mode, last_imported_identifier, updated_at)
+        VALUES (%s, 'auto', %s, now())
+        ON CONFLICT (collection) DO UPDATE
+            SET last_imported_identifier = EXCLUDED.last_imported_identifier, updated_at = now()
+        """,
+        (collection, release_identifier),
+    )
 
 
 def last_successful_sync(conn: psycopg.Connection) -> str | None:

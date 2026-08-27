@@ -258,6 +258,8 @@ def fetch_search_page(
     next_cursor = None
     if has_next and results:
         last = page_rows[-1]
-        last_rank = float(last[-1] or 0.0)
+        # The SELECT ends with (..., rank, edition_count); pagination must use
+        # rank, not the trailing edition count.
+        last_rank = float(last[-2] or 0.0)
         next_cursor = encode_cursor(last_rank, bytes(last[0]).hex())
     return results, next_cursor, total_lower_bound

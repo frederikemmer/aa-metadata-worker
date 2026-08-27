@@ -90,6 +90,9 @@ services:
       # Nach X Minuten ohne Fortschritt bei >=99 % wird der vorhandene Payload
       # resilient importiert (seltene letzte Pieces nicht endlos abwarten).
       SYNC_STALL_AT_99PCT_MIN: "15"              # Minuten (Default 15)
+      # Im Dashboard aktivierbarer schneller Fallback auf eine vorhandene
+      # lokale Payload, wenn die seltenen letzten Torrent-Pieces fehlen.
+      SYNC_IMPORT_STALL_MIN: "5"                 # Minuten (Default 5)
 
       # Storage-Budget (GiB): Warnung / harter Stopp für Downloads+Imports
       STORAGE_WARN_GIB: "300"

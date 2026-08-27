@@ -23,7 +23,6 @@ Der Dienst speichert ausschließlich Metadaten.
 ```
 aa-metadata-worker/
 ├── AGENTS.md                  # Non-Negotiables, Conventions, Architecture Map
-├── HANDOVER.md                # Deployment-Handover-Dokument
 ├── Dockerfile                 # Multi-Stage Build, USER metadata (UID 999)
 ├── docker-compose.yaml        # Produktionsstack (postgres + api)
 ├── docker-compose.local.yaml  # Lokaler Build (Rollback-Option)

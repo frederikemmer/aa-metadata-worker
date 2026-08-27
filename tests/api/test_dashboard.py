@@ -33,7 +33,35 @@ class TestSyncStatusJson:
         assert body["records"] == 0
         # Configured collections are always listed (even without releases).
         names = {c["collection"] for c in body["collections"]}
-        assert {"zlib3_records", "upload_records", "ia2_records"} <= names
+        assert names == {"zlib3_records", "upload_records"}
+
+    def test_inactive_release_is_hidden(self, client, db_conn):
+        db_conn.execute(
+            """
+            INSERT INTO sync_releases
+                (collection, release_identifier, status, started_at)
+            VALUES ('gbooks_records', 'old_release', 'importing', now())
+            """
+        )
+        body = client.get("/api/v1/sync/status").json()
+        assert body["activeSync"] is None
+        assert body["recentReleases"] == []
+        assert body["releasesTracked"] == 0
+
+    def test_collection_mode_round_trip(self, client):
+        url = "/api/v1/sync/collections/upload_records/mode"
+        assert client.get(url).json()["mode"] == "auto"
+        response = client.post(url, json={"mode": "import"})
+        assert response.status_code == 200
+        assert response.json()["mode"] == "import"
+        assert client.get(url).json()["mode"] == "import"
+
+    def test_collection_mode_rejects_inactive_source(self, client):
+        response = client.post(
+            "/api/v1/sync/collections/gbooks_records/mode",
+            json={"mode": "import"},
+        )
+        assert response.status_code == 400
 
     def test_active_sync_visible(self, client, db_conn):
         db_conn.execute(
@@ -79,7 +107,7 @@ class TestDashboardHtml:
         with TestClient(app) as client:
             assert client.get("/dashboard").status_code == 200
             assert client.get("/api/v1/sync/status").status_code == 200
-            # Data endpoints stay protected.
-            assert client.get("/api/v1/search", params={"q": "x"}).status_code == 401
+            # Record endpoints stay protected; search is used by the dashboard.
+            assert client.get("/api/v1/records/" + "ab" * 16).status_code == 401
         monkeypatch.delenv("METADATA_API_KEY")
         close_pool()

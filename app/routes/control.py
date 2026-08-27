@@ -14,7 +14,13 @@ from pydantic import BaseModel
 
 from app.deps import GetConnectionDependency, GetSettingsDependency
 from common.config import Settings
-from sync.state import enqueue_command, is_paused, last_command, set_paused
+from sync.state import (
+    enqueue_command,
+    is_paused,
+    last_command,
+    set_collection_mode,
+    set_paused,
+)
 from sync.worker import next_scheduled_run
 
 router = APIRouter(tags=["sync-control"])
@@ -23,6 +29,43 @@ router = APIRouter(tags=["sync-control"])
 class SyncCommandRequest(BaseModel):
     action: Literal["run_now", "pause", "resume"]
     note: str | None = None
+
+
+class CollectionModeRequest(BaseModel):
+    mode: Literal["auto", "import"]
+
+    model_config = {"json_schema_extra": {"examples": [{"mode": "import"}]}}
+
+
+@router.get("/api/v1/sync/collections/{collection}/mode")
+def collection_mode(
+    collection: str,
+    conn: psycopg.Connection = GetConnectionDependency,
+) -> dict:
+    from sync.state import get_collection_mode
+
+    entry = get_collection_mode(conn, collection)
+    return {
+        "collection": entry.collection,
+        "mode": entry.mode,
+        "lastImportedIdentifier": entry.last_imported_identifier,
+    }
+
+
+@router.post("/api/v1/sync/collections/{collection}/mode", status_code=200)
+def set_collection_sync_mode(
+    collection: str,
+    request: CollectionModeRequest,
+    conn: psycopg.Connection = GetConnectionDependency,
+    settings: Settings = GetSettingsDependency,
+) -> dict:
+    if collection not in settings.aa_collections:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Collection '{collection}' is not active (AA_COLLECTIONS).",
+        )
+    set_collection_mode(conn, collection, request.mode)
+    return {"collection": collection, "mode": request.mode, "queued": True}
 
 
 @router.get("/api/v1/sync/control")

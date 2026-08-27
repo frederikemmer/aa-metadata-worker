@@ -8,6 +8,16 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Local operational diagnostics (may contain host details or credentials)
+_cols.sql
+_measure.py
+_ssh.py
+_upload.py
+check_bytes.py
+monitor*.py
+monitor*.log
+status*.json
+
 # Env & data
 .env
 data/

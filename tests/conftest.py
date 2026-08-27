@@ -19,6 +19,16 @@ FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
 TEST_PG_IMAGE = "postgres:17-alpine"
 
 
+@pytest.fixture(autouse=True)
+def reset_import_shutdown_state():
+    """TestClient shutdown must not poison later importer tests in this process."""
+    from sync.importer import reset_shutdown
+
+    reset_shutdown()
+    yield
+    reset_shutdown()
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -88,7 +98,10 @@ def db_conn(postgres_docker) -> psycopg.Connection:
     apply_migrations(conn)
     yield conn
     # Wipe all data so each test starts clean without recreating the container.
-    conn.execute("TRUNCATE metadata_records, sync_releases RESTART IDENTITY CASCADE")
+    conn.execute(
+        "TRUNCATE metadata_records, sync_releases, collection_sync_modes "
+        "RESTART IDENTITY CASCADE"
+    )
     conn.close()
 
 

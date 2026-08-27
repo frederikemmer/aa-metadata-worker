@@ -102,6 +102,12 @@ class Settings:
     # at the end, so the missing tail is simply imported on a later run.
     sync_stall_at_99_min: int = 15
 
+    # Stall timeout (minutes) used while a collection is in 'import' mode.  A
+    # shorter window makes a stuck download fall back to a resilient import of
+    # the locally available payload much sooner, so the index stays fresh
+    # without waiting the full sync_stall_at_99_min for rare tail pieces.
+    sync_import_stall_min: int = 5
+
     # Storage guard (GiB). Defaults sized for NAS deployment (see docs/sync.md).
     storage_warn_gib: int = 300
     storage_stop_gib: int = 400
@@ -152,6 +158,7 @@ def load_settings() -> Settings:
         sync_max_downloads=_env_int("SYNC_MAX_DOWNLOADS", 4),
         sync_checking_grace_min=_env_int("SYNC_CHECKING_GRACE_MIN", 120),
         sync_stall_at_99_min=_env_int("SYNC_STALL_AT_99PCT_MIN", 15),
+        sync_import_stall_min=_env_int("SYNC_IMPORT_STALL_MIN", 5),
         storage_warn_gib=_env_int("STORAGE_WARN_GIB", 300),
         storage_stop_gib=_env_int("STORAGE_STOP_GIB", 400),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),

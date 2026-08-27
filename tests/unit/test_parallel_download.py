@@ -122,6 +122,22 @@ class TestDownloadOne:
         # seed_base should point to .prev/<collection>.payload
         assert "seed_base" in call_kwargs.kwargs or len(call_kwargs.args) >= 6
 
+    @patch("sync.run.connect")
+    @patch("sync.run.TorrentClient")
+    def test_custom_rare_tail_timeout_is_forwarded(self, mock_client_cls, mock_connect):
+        mock_connect.return_value = MagicMock()
+        mock_client_cls.return_value.download.return_value = Path("x")
+        settings = MagicMock(
+            sync_reuse_prev_payload=False,
+            sync_checking_grace_min=120,
+            sync_stall_at_99_min=15,
+        )
+
+        _download_one("upload_records", "id", "url", "", 1, Path("/w"), settings,
+                      stall_at_99_s=300)
+
+        assert mock_client_cls.call_args.kwargs["stall_at_99_s"] == 300
+
 
 class TestDownloadSequential:
     """_download_sequential reuses a single TorrentClient and imports inline."""

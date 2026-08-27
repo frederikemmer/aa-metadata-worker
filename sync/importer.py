@@ -93,9 +93,14 @@ def request_shutdown(signum, _frame) -> None:  # pragma: no cover - signal plumb
     logger.info("Shutdown requested (%s); finishing current batch...", signum)
 
 
-def install_signal_handlers() -> None:
+def reset_shutdown() -> None:
+    """Clear a previous cooperative stop before starting another import run."""
     global _shutdown_requested
     _shutdown_requested = False
+
+
+def install_signal_handlers() -> None:
+    reset_shutdown()
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
 
@@ -189,10 +194,18 @@ def process_batch(
         final_rows.append({**record_to_params(incoming), "quality_score": incoming_score})
 
     with conn.transaction():
+        existing_md5s = {
+            bytes(row[0])
+            for row in conn.execute(
+                "SELECT md5 FROM metadata_records WHERE md5 = ANY(%s)",
+                (list(folded),),
+            ).fetchall()
+        }
         with conn.cursor() as cur:
             cur.executemany(_UPSERT_SQL, final_rows)
 
-    stats.inserted += len(final_rows)
+    stats.inserted += len(final_rows) - len(existing_md5s)
+    stats.updated += len(existing_md5s)
     stats.batches += 1
 
 
