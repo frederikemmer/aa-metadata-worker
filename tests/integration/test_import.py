@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
+from common.config import load_settings
 from common.db import apply_migrations, list_migrations
 from common.normalize import normalize_md5
+from sync import state
 from sync.importer import import_release
 from sync.sources import get_adapter
 from tests.conftest import fixture_lines, make_zst
@@ -40,6 +44,43 @@ class TestImportPipeline:
         # Release counters persisted
         row = db_conn.execute("SELECT records_seen, records_inserted FROM sync_releases").fetchone()
         assert row[0] >= row[1]
+
+    def test_discard_only_import_persists_progress(self, db_conn, tmp_path, monkeypatch):
+        release_id = db_conn.execute(
+            "INSERT INTO sync_releases (collection, release_identifier) "
+            "VALUES ('upload_records', 'discard_only') RETURNING id"
+        ).fetchone()[0]
+        raw = {
+            "aacid": "aacid__upload_records_academia_edu__20250101T000000Z__1__Paper",
+            "metadata": {
+                "md5": "f" * 32,
+                "filepath": "papers/paper.pdf",
+                "exiftool_output": {"Title": "Paper", "Author": "Author"},
+            },
+        }
+        payload = make_zst([raw, raw], tmp_path / "discard-only.jsonl.zst")
+        counter_updates = []
+        original_update = state.update_release_counters
+
+        def track_update(*args, **kwargs):
+            counter_updates.append(kwargs.copy())
+            return original_update(*args, **kwargs)
+
+        monkeypatch.setattr(state, "update_release_counters", track_update)
+        settings = dataclasses.replace(load_settings(), sync_batch_size=2)
+
+        stats = import_release(db_conn, "upload_records", payload, release_id, settings=settings)
+
+        row = db_conn.execute(
+            "SELECT records_seen, records_discarded FROM sync_releases WHERE id = %s",
+            (release_id,),
+        ).fetchone()
+        assert stats.seen == 2
+        assert stats.discarded == 2
+        assert row == (2, 2)
+        assert counter_updates == [
+            {"seen": 2, "inserted": 0, "updated": 0, "skipped": 0, "discarded": 2, "failed": 0}
+        ]
 
     def test_duplicate_md5_not_duplicated(self, db_conn, tmp_path):
         lines = fixture_lines("zlib3_records")

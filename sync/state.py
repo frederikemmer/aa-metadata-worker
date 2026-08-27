@@ -137,7 +137,7 @@ def set_release_status(
     completed = ", completed_at = now()" if status == "completed" else ""
     counters = (
         ", records_seen = 0, records_inserted = 0, records_updated = 0, "
-        "records_skipped = 0, records_failed = 0, "
+        "records_skipped = 0, records_discarded = 0, records_failed = 0, "
         "import_done_bytes = 0, import_total_bytes = 0"
         if reset_counters
         else ""

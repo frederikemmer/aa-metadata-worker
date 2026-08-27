@@ -361,19 +361,11 @@ def import_release(
 
     def flush() -> None:
         nonlocal batch
-        if not batch:
-            return
-        process_batch(conn, batch, stats)
-        state.update_release_counters(
-            conn,
-            release_id,
-            seen=stats.seen - flushed["seen"],
-            inserted=stats.inserted - flushed["inserted"],
-            updated=stats.updated - flushed["updated"],
-            skipped=stats.skipped - flushed["skipped"],
-            discarded=stats.discarded - flushed["discarded"],
-            failed=stats.failed - flushed["failed"],
-        )
+        if batch:
+            process_batch(conn, batch, stats)
+        deltas = {key: getattr(stats, key) - flushed[key] for key in flushed}
+        if any(deltas.values()):
+            state.update_release_counters(conn, release_id, **deltas)
         for key in flushed:
             flushed[key] = getattr(stats, key)
         batch = []
@@ -417,7 +409,7 @@ def import_release(
             if len(stats.error_samples) < 20:
                 stats.error_samples.append(f"{type(error).__name__}: {error} :: {line[:200]}")
 
-        if len(batch) >= batch_size:
+        if len(batch) >= batch_size or stats.seen - flushed["seen"] >= batch_size:
             flush()
             if stats.seen >= 10000 and stats.failed / max(stats.seen, 1) > settings.sync_error_abort_rate:
                 flush()
