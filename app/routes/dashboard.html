@@ -237,6 +237,7 @@ async function checkLatestRelease(){
   }catch(e){ /* offline / rate-limited: keep version without badge */ }
 }
 let dlTrackers = {};   // key -> sliding-window samples, one per running download
+let importTrackers = {}; // key -> recent byte/record samples for true live speed
 
 // Sliding-window download rate (the DB progress counter only updates in
 // intervals, so a short client-side average gives a stable speed + ETA).
@@ -271,6 +272,33 @@ function trackDownload(a){
     line = '⇣ Geschwindigkeit wird ermittelt…';
   }
   return `<div class="small">${line}</div>`;
+}
+
+function trackImport(a){
+  const key = a.collection+'/'+(a.releaseIdentifier||'');
+  const now = Date.now();
+  let tracker = importTrackers[key];
+  const done = a.importDoneBytes || 0, seen = a.recordsSeen || 0;
+  if(!tracker || done < tracker.lastDone || seen < tracker.lastSeen){
+    tracker = {samples:[], lastDone:done, lastSeen:seen, lastChange:now};
+    importTrackers[key] = tracker;
+  }
+  if(done !== tracker.lastDone || seen !== tracker.lastSeen) tracker.lastChange = now;
+  tracker.lastDone = done; tracker.lastSeen = seen;
+  tracker.samples.push({t:now, done, seen});
+  while(tracker.samples.length > 1 && now-tracker.samples[0].t > 120000) tracker.samples.shift();
+  const first = tracker.samples[0];
+  const seconds = (now-first.t)/1000;
+  if(seconds < 12) return null;
+  const bytesPerSecond = (done-first.done)/seconds;
+  const recordsPerSecond = (seen-first.seen)/seconds;
+  const remaining = Math.max(0, (a.importTotalBytes||0)-done);
+  return {
+    bytesPerSecond, recordsPerSecond, windowSeconds:seconds,
+    stalled: bytesPerSecond <= 0 && recordsPerSecond <= 0,
+    stagnantSeconds: (now-tracker.lastChange)/1000,
+    etaSeconds: bytesPerSecond > 0 && remaining > 0 ? remaining/bytesPerSecond : 0
+  };
 }
 
 function toast(msg, ok=true){
@@ -442,13 +470,24 @@ function renderPerformance(d){
   if(activeImports.length){
     html += '<div class="perf-grid">' + activeImports.map(r=>{
       const m = importMetrics(r);
+      const live = trackImport(r);
+      if(live?.stalled){
+        return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
+          <div class="big" style="color:var(--warn)">Kein Fortschritt</div>
+          <div class="small">Live-Messung: seit ${fmtDuration(live.stagnantSeconds)} keine neuen Bytes oder Records.</div></div>`;
+      }
+      if(live){
+        return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
+          <div class="big">${fmt(Math.round(live.recordsPerSecond))} Records/s</div>
+          <div class="small">${scaleBytes(live.bytesPerSecond)}/s · Live über ${fmtDuration(live.windowSeconds)} · ETA ${fmtEta(live.etaSeconds)}</div></div>`;
+      }
       if(!m.seconds){
         return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
           <div class="small">Messung beginnt mit dem nächsten Import-Start.</div></div>`;
       }
       return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
         <div class="big">${r.importTimingEstimated?'≈ ':''}${fmt(Math.round(m.recordsPerSecond))} Records/s</div>
-        <div class="small">${scaleBytes(m.bytesPerSecond)}/s · Laufzeit ${fmtDuration(m.seconds)} · ETA ${fmtEta(m.etaSeconds)}${r.importTimingEstimated?' · Schätzung ab Laufstart':''}</div></div>`;
+        <div class="small">${scaleBytes(m.bytesPerSecond)}/s · Live-Messung wird ermittelt · ETA ${fmtEta(m.etaSeconds)}${r.importTimingEstimated?' · Schätzung ab Laufstart':''}</div></div>`;
     }).join('') + '</div>';
   }
   if(history.length){

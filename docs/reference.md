@@ -499,6 +499,8 @@ Ab Schema v8 enthalten Releases außerdem `importStartedAt`,
 `importDurationSeconds`, `discardReasons` und bounded `discardSamples`.
 Für ältere laufende Releases ohne `importStartedAt` basiert die Dauer auf
 `startedAt` und wird mit `importTimingEstimated=true` gekennzeichnet.
+Das Dashboard ersetzt diese Startschätzung nach zwölf Sekunden durch eine
+gleitende Live-Rate und kennzeichnet ausbleibenden Byte- und Record-Fortschritt.
 Top-Level `discardAnalysis` aggregiert die Filtergründe über die aktiven
 Collections; je Grund werden höchstens drei kompakte Beispiele ausgegeben.
 
