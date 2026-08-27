@@ -34,6 +34,14 @@ _DHT_ROUTERS = [
     ("dht.anon.p0ps.org", 6881),
 ]
 
+# Seconds of zero progress before we surface a "has peers, no seeder" warning.
+_PEER_GAP_S = 600
+
+# Progress at/above which a cumulative release's missing tail pieces are
+# treated as "rare tail" — after a short window the download is declared
+# stalled and the already-downloaded payload is imported resiliently.
+_STALL_AT_99_PROGRESS = 0.99
+
 
 class TorrentDownloadError(RuntimeError):
     pass
@@ -64,7 +72,7 @@ def _adaptive_stall_timeout(
     declaring the download stalled and falling back to the magnet link / a
     partial import of the already-downloaded payload.
     """
-    if progress >= 0.99:
+    if progress >= _STALL_AT_99_PROGRESS:
         return max(base, at_99_s)  # give up on rare tail pieces after at_99_s
     if progress >= 0.95:
         return max(base, 1800.0)  # 30 min — pieces may still be findable
@@ -209,8 +217,17 @@ class TorrentClient:
             elif checking:
                 # Only treat re-checking as activity up to the configured grace.
                 # After that, a stuck check must not bypass the stall timeout.
-                if now - last_check_start > self.checking_grace_s:
-                    pass  # do not reset last_progress_change — let stall fire
+                # CRITICAL: near completion (>=99%) a "checking" state cannot be
+                # distinguished from a stalled tail on a partial seed base. If we
+                # kept resetting last_progress_change here, the (default 120 min)
+                # checking grace window would suppress the 15-min rare-tail stall
+                # that triggers the resilient partial import — never import the
+                # already-available 99.5% payload. So above the 99% threshold the
+                # stall counter must run regardless of what libtorrent claims.
+                if progress >= _STALL_AT_99_PROGRESS:
+                    pass  # let the rare-tail stall fire even if "checking"
+                elif now - last_check_start > self.checking_grace_s:
+                    pass  # grace exhausted — do not reset, let stall fire
                 else:
                     last_progress_change = now
 
@@ -224,12 +241,16 @@ class TorrentClient:
             if now - last_log >= progress_every_s:
                 last_log = now
                 logger.info(
-                    "Torrent %s: %.1f%% (peers=%d, seeds=%d, down=%.0f KiB/s)",
+                    "Torrent %s: %.1f%% (peers=%d, seeds=%d, down=%.0f KiB/s, state=%s, "
+                    "stalled=%.0fs/limit=%.0fs)",
                     release_identifier[:60],
                     progress * 100,
                     status.num_peers,
                     status.num_seeds,
                     status.download_payload_rate / 1024,
+                    status.state,
+                    now - last_progress_change,
+                    _adaptive_stall_timeout(progress, at_99_s=self.stall_at_99_s),
                 )
 
             # Peer-less diagnosis: stuck at 0% with no peers means the torrent
@@ -252,6 +273,30 @@ class TorrentClient:
                 peerless_since = None
                 last_peerless_log = 0.0
 
+            # Peers are visible but nothing downloads: distinguish "seeding
+            # availability" (no Seed with full data) from stalled progress.
+            # If we have peer connections, but no seeder has useful pieces and
+            # nothing has moved for a while, surface num_seeds + distributed
+            # copies so the operator can tell whether this is a poor-seeding
+            # issue rather than a code fault.
+            if (
+                progress == 0.0
+                and status.num_peers > 0
+                and status.num_seeds == 0
+                and now - last_progress_change > _PEER_GAP_S
+                and now - last_peerless_log >= 300
+            ):
+                last_peerless_log = now
+                logger.warning(
+                    "[%s] Has peers (=%d) but no full seeder and 0 download for "
+                    "%.0f min (seeds=0, dist=%.1f copies) — piece availability "
+                    "too low to acquire any piece; keeping torrent active.",
+                    release_identifier[:40],
+                    status.num_peers,
+                    (now - last_progress_change) / 60,
+                    status.distributed_full_copies,
+                )
+
             if status.is_seeding or progress >= 1.0:
                 break
 
@@ -272,7 +317,7 @@ class TorrentClient:
 
             # Periodically force re-announce when stalled to find new peers.
             # At 99%+ re-announce every 2 min to discover rare-piece seeders.
-            reannounce_gap = 120 if progress >= 0.99 else announce_interval
+            reannounce_gap = 120 if progress >= _STALL_AT_99_PROGRESS else announce_interval
             if stalled_s > reannounce_gap and now - last_reannounce > reannounce_gap:
                 last_reannounce = now
                 try:
