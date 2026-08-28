@@ -326,6 +326,24 @@ def sync_status(
     assert db_size_row and version_row and totals_row and last_sync_row
     migrations = list_migrations()
     ready = bool(migrations) and int(version_row[0]) >= migrations[-1][0]
+    collection_weights = []
+    for name in active_collections:
+        latest = latest_by_collection.get(name)
+        inserted = int(latest[9]) if latest else 0
+        collection_weights.append((name, max(inserted, 0)))
+    weight_total = sum(weight for _name, weight in collection_weights)
+    if weight_total <= 0:
+        collection_weights = [(name, 1) for name in active_collections]
+        weight_total = max(len(collection_weights), 1)
+    collection_breakdown = [
+        {
+            "collection": name,
+            "estimatedRecords": round(int(records_row) * weight / weight_total),
+            "estimatedDatabaseBytes": round(int(db_size_row[0]) * weight / weight_total),
+            "share": weight / weight_total,
+        }
+        for name, weight in collection_weights
+    ]
 
     return {
         "ready": ready,
@@ -334,6 +352,7 @@ def sync_status(
         "records": records_row,
         "lastSuccessfulSync": last_sync_row[0],
         "databaseSizeBytes": int(db_size_row[0]),
+        "collectionBreakdown": collection_breakdown,
         "diskFreeBytes": int(disk_free),
         "storageWarnGib": settings.storage_warn_gib,
         "storageStopGib": settings.storage_stop_gib,

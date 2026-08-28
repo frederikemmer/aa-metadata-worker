@@ -32,6 +32,7 @@ class TestSyncStatusJson:
             "discardAnalysis",
             "importHistory", "subcollectionFilters", "retainedPayloads",
             "filterAnalysisJobs",
+            "collectionBreakdown",
         ):
             assert key in body, f"missing key {key}"
         assert body["activeSync"] is None
@@ -42,6 +43,10 @@ class TestSyncStatusJson:
         filters = {item["subcollection"]: item for item in body["subcollectionFilters"]}
         assert filters["aaaaarg"]["blocked"] is True
         assert filters["aaaaarg"]["latestFiltered"] is None
+        assert {item["collection"] for item in body["collectionBreakdown"]} == {
+            "zlib3_records", "upload_records"
+        }
+        assert sum(item["share"] for item in body["collectionBreakdown"]) == 1
 
     def test_inactive_release_is_hidden(self, client, db_conn):
         db_conn.execute(
@@ -296,6 +301,12 @@ class TestDashboardHtml:
         assert "Subcollection-Filter hinzufügen" in html
         assert "toggle-track" in html
         assert "Werte neu auswerten" in html
+        assert "<h2>Releases</h2>" in html
+        assert "active-details" in html
+        assert "release-logs" in html
+        assert "poll-cadence" not in html
+        assert "<h2>Status</h2>" not in html
+        assert "Gespeicherte Importdateien" not in html
 
     def test_dashboard_exempt_from_auth(self, db_conn, monkeypatch):
         monkeypatch.setenv("METADATA_API_KEY", "secret")

@@ -515,6 +515,12 @@ Statistik-Neuauswertungen. Vollständig neu berechnete Treffer aus
 `release_subcollection_stats` ersetzen für das jeweilige Release die während
 des Imports nur teilweise erfassten Subcollection-Zähler.
 
+`collectionBreakdown` verteilt die geschätzte Gesamtzahl und
+`pg_database_size()` proportional zu den `recordsInserted`-Zählern der jeweils
+neuesten aktiven Collection-Releases. Diese bewusst scanfreie Schätzung speist
+den segmentierten Datenbankbalken; sie ist keine physische PostgreSQL-
+Tabellenmessung je Quelle.
+
 Top-Level `appVersion` enthält den beim Docker-Build eingebrannten Git-Commit
 (`APP_VERSION` build-arg, lokal `"dev"`). Das Dashboard zeigt ihn neben der
 Überschrift und gleicht ihn mit GitHub ab („✓ aktuell" / „⟳ Update verfügbar").

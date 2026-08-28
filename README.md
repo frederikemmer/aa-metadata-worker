@@ -102,15 +102,15 @@ Containername erreicht.
 10 s im Leerlauf und reduziert bei inaktivem Browser-Tab):
 
 * aktiver Sync: Phase (Download/Import/Validierung), Fortschrittsbalken,
-  Zähler (gesehen/neu/aktualisiert/übersprungen/verworfen/Fehler)
-* Import-Leistung mit stabilem Mittelwert, 5-Minuten-Messpunkten und 12-Stunden-Graph
+  Zähler und einklappbare Live-Importleistung
+* kompakte Bestandsmetriken für Datensätze, verworfene Records und Releases
+* geschätzte Datenbankaufteilung je Collection als segmentierter Tooltip-Balken
+* gemeinsamer Release-Bereich mit Durchsatzhistorie, Collections, Payload-Aktionen
+  und einklappbaren Release-Logs
 * erweiterbare `upload_records`-Subcollection-Filter mit Ein/Aus-Toggles,
   Trefferzahlen und geschätztem DB-Mehrbedarf
 * importfreie Neuauswertung der Filterstatistik aus einer gespeicherten Payload
 * manuell verwaltete lokale Payloads für Reimport und Delta-Downloads
-* Collections-Übersicht mit letztem Release-Status
-* Storage-Budget-Balken gegen Warn/Stopp-Grenzen
-* die letzten Releases inklusive Fehlermeldungen
 
 Technisch liest das Dashboard ausschließlich PostgreSQL (Tabelle
 `sync_releases`), die der Sync-Worker während des Laufs aktualisiert – es
