@@ -68,6 +68,14 @@ genau diese zeitbegrenzte Dashboard-Abfrage.
 Persistente Admin-Overrides (`subcollection`, `blocked`, `updated_at`) für die
 in der Compose-Konfiguration definierten `upload_records`-Standardfilter.
 
+### filter_analysis_jobs / release_subcollection_stats
+
+`filter_analysis_jobs` ist die persistente Queue für manuell gestartete,
+importfreie Payload-Scans samt Byte-/Record-Fortschritt und Filter-Snapshot.
+`release_subcollection_stats` speichert den zuletzt vollständig neu berechneten
+Trefferwert je Release und Subcollection. Beide Tabellen enthalten keine
+Buchmetadaten und verändern `sync_releases`-Importzähler nicht.
+
 ### schema_migrations
 
 `version INT PK, name, applied_at` – geführt von `common.db.apply_migrations`

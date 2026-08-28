@@ -61,6 +61,13 @@ lokalen Reimport. Die angezeigte GiB-Projektion schätzt zusätzlichen
 PostgreSQL-Platz; der Torrent-Download ist unverändert, weil vor dem Filter
 ohnehin der komplette `upload_records`-Payload vorliegt.
 
+Über „Werte neu auswerten“ kann die Statistik eines noch lokal gespeicherten
+`upload_records`-Releases vollständig unter dem aktuellen Filterstand neu
+berechnet werden. Dieser Hintergrundauftrag streamt nur die `.prev`-Payload,
+zählt Subcollection-Treffer und schreibt `release_subcollection_stats`. Er ruft
+weder den Importer noch den Torrent-Client auf und verändert keine Metadaten.
+Das Dashboard zeigt Fortschritt in Bytes und geprüften Records.
+
 ## Incremental Updates
 
 ```text

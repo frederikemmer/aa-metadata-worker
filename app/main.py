@@ -69,6 +69,22 @@ def _start_sync_worker() -> None:
     logger.info("Background sync worker thread started.")
 
 
+def _start_filter_analysis_worker() -> threading.Thread:
+    """Launch the independent, statistics-only payload scanner."""
+    def _run() -> None:
+        from sync.filter_analysis import run_filter_analysis_worker_forever
+
+        try:
+            run_filter_analysis_worker_forever()
+        except Exception:  # noqa: BLE001 - API must survive analysis failures
+            logger.exception("Filter analysis worker thread failed.")
+
+    thread = threading.Thread(target=_run, name="filter-analysis-worker", daemon=True)
+    thread.start()
+    logger.info("Background filter analysis worker started.")
+    return thread
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = load_settings()
@@ -99,6 +115,7 @@ async def lifespan(app: FastAPI):
 
     # Start sync worker in background (if enabled).
     _start_sync_worker()
+    analysis_thread = _start_filter_analysis_worker()
 
     yield
 
@@ -106,6 +123,10 @@ async def lifespan(app: FastAPI):
     from sync.worker import request_stop
 
     request_stop()
+    from sync.filter_analysis import request_stop as request_analysis_stop
+
+    request_analysis_stop()
+    analysis_thread.join(timeout=3)
     close_pool()
 
 

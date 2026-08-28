@@ -168,9 +168,15 @@ def sync_status(
             "SELECT subcollection, blocked FROM upload_subcollection_filters"
         ).fetchall()
     }
+    filter_updated = {
+        row[0]: row[1].isoformat()
+        for row in conn.execute(
+            "SELECT subcollection, updated_at FROM upload_subcollection_filters"
+        ).fetchall()
+    }
     upload_release_rows = conn.execute(
         """
-        SELECT release_identifier, discard_reasons
+        SELECT release_identifier, discard_reasons, discovered_at
         FROM sync_releases
         WHERE collection = 'upload_records'
         ORDER BY discovered_at DESC
@@ -178,7 +184,7 @@ def sync_status(
         """
     ).fetchall()
     filtered_by_name: dict[str, dict] = {}
-    for release_identifier, reasons in upload_release_rows:
+    for release_identifier, reasons, discovered_at in upload_release_rows:
         for reason, count in reasons.items():
             if not reason.startswith("blocked_subcollection:"):
                 continue
@@ -187,8 +193,46 @@ def sync_status(
             value = int(count)
             entry["total"] += value
             entry["releases"].append(
-                {"releaseIdentifier": release_identifier, "count": value}
+                {
+                    "releaseIdentifier": release_identifier,
+                    "count": value,
+                    "sortAt": discovered_at.isoformat(),
+                }
             )
+    analyzed_rows = conn.execute(
+        """
+        SELECT s.subcollection, s.matching_records, s.filter_blocked,
+               s.analyzed_at, r.id, r.release_identifier, r.discovered_at
+        FROM release_subcollection_stats s
+        JOIN sync_releases r ON r.id = s.release_id
+        WHERE r.collection = 'upload_records'
+        ORDER BY r.discovered_at DESC
+        """
+    ).fetchall()
+    for (
+        name, count, blocked_at_analysis, analyzed_at, release_id,
+        release_identifier, discovered_at,
+    ) in analyzed_rows:
+        entry = filtered_by_name.setdefault(name, {"total": 0, "releases": []})
+        entry["releases"] = [
+            value for value in entry["releases"]
+            if value["releaseIdentifier"] != release_identifier
+        ]
+        entry["releases"].append(
+            {
+                "releaseId": int(release_id),
+                "releaseIdentifier": release_identifier,
+                "count": int(count),
+                "analyzedAt": analyzed_at.isoformat(),
+                "filterBlocked": bool(blocked_at_analysis),
+                "sortAt": discovered_at.isoformat(),
+            }
+        )
+    for entry in filtered_by_name.values():
+        entry["releases"].sort(key=lambda value: value["sortAt"], reverse=True)
+        entry["total"] = sum(value["count"] for value in entry["releases"])
+        for release_stats in entry["releases"]:
+            release_stats.pop("sortAt", None)
     default_filters = set(settings.upload_blocked_subcollections)
     filter_names = default_filters | set(filter_overrides) | set(filtered_by_name)
     avg_db_bytes = int(db_size_row[0]) / max(int(records_row), 1)
@@ -203,10 +247,12 @@ def sync_status(
                 "blocked": blocked,
                 "isDefault": name in default_filters,
                 "hasOverride": name in filter_overrides,
+                "effectiveSince": filter_updated.get(name),
                 "latestFiltered": latest_count,
                 "totalFiltered": stats["total"],
                 "estimatedAdditionalDbBytes": (
-                    int(latest_count * avg_db_bytes) if latest_count is not None else None
+                    int(latest_count * avg_db_bytes)
+                    if latest_count is not None and blocked else (0 if latest_count is not None else None)
                 ),
                 "releases": stats["releases"],
             }
@@ -223,6 +269,16 @@ def sync_status(
         path = pathlib.Path(WORK_DIR) / ".prev" / f"{collection}.payload"
         stat = path.stat() if path.is_file() else None
         mode = modes_by_collection.get(collection, ("auto", None))
+        release_row = (
+            conn.execute(
+                """
+                SELECT id FROM sync_releases
+                WHERE collection = %s AND release_identifier = %s
+                """,
+                (collection, mode[1]),
+            ).fetchone()
+            if mode[1] else None
+        )
         payloads.append(
             {
                 "collection": collection,
@@ -233,8 +289,34 @@ def sync_status(
                     if stat else None
                 ),
                 "releaseIdentifier": mode[1],
+                "releaseId": int(release_row[0]) if release_row else None,
             }
         )
+
+    analysis_jobs = [
+        {
+            "id": int(row[0]),
+            "releaseId": int(row[1]),
+            "releaseIdentifier": row[2],
+            "status": row[3],
+            "progressBytes": int(row[4]),
+            "totalBytes": int(row[5]),
+            "recordsScanned": int(row[6]),
+            "errorMessage": row[7],
+            "createdAt": row[8].isoformat(),
+            "completedAt": row[9].isoformat() if row[9] else None,
+        }
+        for row in conn.execute(
+            """
+            SELECT j.id, j.release_id, r.release_identifier, j.status,
+                   j.progress_bytes, j.total_bytes, j.records_scanned,
+                   j.error_message, j.created_at, j.completed_at
+            FROM filter_analysis_jobs j
+            JOIN sync_releases r ON r.id = j.release_id
+            ORDER BY j.id DESC LIMIT 8
+            """
+        ).fetchall()
+    ]
 
     try:
         disk_free = shutil.disk_usage(WORK_DIR).free
@@ -269,6 +351,7 @@ def sync_status(
         "importHistory": import_history,
         "subcollectionFilters": subcollection_filters,
         "retainedPayloads": payloads,
+        "filterAnalysisJobs": analysis_jobs,
         "activeSync": active,
         "collections": collections,
         "recentReleases": [_row_to_release(row) for row in recent_rows],

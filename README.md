@@ -104,7 +104,9 @@ Containername erreicht.
 * aktiver Sync: Phase (Download/Import/Validierung), Fortschrittsbalken,
   Zähler (gesehen/neu/aktualisiert/übersprungen/verworfen/Fehler)
 * Import-Leistung mit stabilem Mittelwert, 5-Minuten-Messpunkten und 12-Stunden-Graph
-* bearbeitbare `upload_records`-Subcollection-Filter samt Filtermenge und geschätztem DB-Mehrbedarf
+* erweiterbare `upload_records`-Subcollection-Filter mit Ein/Aus-Toggles,
+  Trefferzahlen und geschätztem DB-Mehrbedarf
+* importfreie Neuauswertung der Filterstatistik aus einer gespeicherten Payload
 * manuell verwaltete lokale Payloads für Reimport und Delta-Downloads
 * Collections-Übersicht mit letztem Release-Status
 * Storage-Budget-Balken gegen Warn/Stopp-Grenzen

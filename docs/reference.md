@@ -510,6 +510,11 @@ Ab Schema v9 enthält `importHistory` persistente 5-Minuten-Fenster der letzten
 Overrides, Filtermengen je Release und eine ungefähre DB-Platzprojektion.
 `retainedPayloads` listet ausschließlich die bekannten `.prev`-Payloadpfade.
 
+Ab Schema v10 ergänzt `filterAnalysisJobs` den Fortschritt manueller
+Statistik-Neuauswertungen. Vollständig neu berechnete Treffer aus
+`release_subcollection_stats` ersetzen für das jeweilige Release die während
+des Imports nur teilweise erfassten Subcollection-Zähler.
+
 Top-Level `appVersion` enthält den beim Docker-Build eingebrannten Git-Commit
 (`APP_VERSION` build-arg, lokal `"dev"`). Das Dashboard zeigt ihn neben der
 Überschrift und gleicht ihn mit GitHub ab („✓ aktuell" / „⟳ Update verfügbar").
@@ -542,6 +547,7 @@ Worker pollt `sync_commands` alle 10 Sekunden.
 Weitere geschützte Admin-Endpunkte:
 
 * `POST /api/v1/sync/subcollections/{name}` mit `{ "blocked": true|false }`
+* `POST /api/v1/sync/filter-analysis` mit `{ "release_id": 123 }`
 * `POST /api/v1/sync/collections/{collection}/mode` mit `{ "mode": "import" }`
 * `DELETE /api/v1/sync/payloads/{collection}` für die manuelle Payload-Löschung
 

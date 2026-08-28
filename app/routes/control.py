@@ -19,6 +19,8 @@ from common.config import Settings
 from sync.state import (
     clear_retained_payload_identifier,
     enqueue_command,
+    enqueue_filter_analysis,
+    get_subcollection_filter_overrides,
     is_paused,
     last_command,
     set_collection_mode,
@@ -45,6 +47,10 @@ class CollectionModeRequest(BaseModel):
 
 class SubcollectionFilterRequest(BaseModel):
     blocked: bool
+
+
+class FilterAnalysisRequest(BaseModel):
+    release_id: int
 
 
 @router.get("/api/v1/sync/collections/{collection}/mode")
@@ -90,6 +96,54 @@ def set_upload_subcollection_filter(
     return {"subcollection": subcollection, "blocked": request.blocked}
 
 
+@router.post("/api/v1/sync/filter-analysis", status_code=202)
+def queue_filter_analysis(
+    request: FilterAnalysisRequest,
+    conn: psycopg.Connection = GetConnectionDependency,
+    settings: Settings = GetSettingsDependency,
+) -> dict:
+    release = conn.execute(
+        """
+        SELECT id, release_identifier FROM sync_releases
+        WHERE id = %s AND collection = 'upload_records'
+        """,
+        (request.release_id,),
+    ).fetchone()
+    if release is None:
+        raise HTTPException(status_code=404, detail="upload_records release not found.")
+    mode = conn.execute(
+        """
+        SELECT last_imported_identifier FROM collection_sync_modes
+        WHERE collection = 'upload_records'
+        """
+    ).fetchone()
+    payload = WORK_DIR / ".prev" / "upload_records.payload"
+    if mode is None or mode[0] != release[1] or not payload.is_file():
+        raise HTTPException(
+            status_code=409,
+            detail="The retained payload for this release is not available.",
+        )
+
+    overrides = get_subcollection_filter_overrides(conn)
+    names = set(settings.upload_blocked_subcollections) | set(overrides)
+    blocked_names = set(settings.upload_blocked_subcollections)
+    for name, blocked in overrides.items():
+        if blocked:
+            blocked_names.add(name)
+        else:
+            blocked_names.discard(name)
+    snapshot = {name: name in blocked_names for name in sorted(names)}
+    job_id, created = enqueue_filter_analysis(
+        conn, int(release[0]), snapshot, payload.stat().st_size
+    )
+    return {
+        "queued": True,
+        "created": created,
+        "id": job_id,
+        "releaseId": int(release[0]),
+    }
+
+
 @router.delete("/api/v1/sync/payloads/{collection}", status_code=200)
 def delete_retained_payload(
     collection: str,
@@ -98,6 +152,20 @@ def delete_retained_payload(
 ) -> dict:
     if collection not in settings.aa_collections:
         raise HTTPException(status_code=400, detail="Collection is not active.")
+    in_use = conn.execute(
+        """
+        SELECT 1 FROM filter_analysis_jobs j
+        JOIN sync_releases r ON r.id = j.release_id
+        WHERE r.collection = %s AND j.status IN ('pending', 'running')
+        LIMIT 1
+        """,
+        (collection,),
+    ).fetchone()
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail="The payload is currently used by a filter analysis.",
+        )
     payload = WORK_DIR / ".prev" / f"{collection}.payload"
     if not payload.is_file():
         raise HTTPException(status_code=404, detail="No retained payload found.")

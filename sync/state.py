@@ -313,6 +313,130 @@ def set_subcollection_filter(
     )
 
 
+def enqueue_filter_analysis(
+    conn: psycopg.Connection,
+    release_id: int,
+    filters_snapshot: dict[str, bool],
+    total_bytes: int,
+) -> tuple[int, bool]:
+    """Queue a full statistics-only scan, deduplicating active jobs."""
+    existing = conn.execute(
+        """
+        SELECT id FROM filter_analysis_jobs
+        WHERE release_id = %s AND status IN ('pending', 'running')
+        ORDER BY id DESC LIMIT 1
+        """,
+        (release_id,),
+    ).fetchone()
+    if existing:
+        return int(existing[0]), False
+    row = conn.execute(
+        """
+        INSERT INTO filter_analysis_jobs
+            (release_id, filters_snapshot, total_bytes)
+        VALUES (%s, %s, %s)
+        RETURNING id
+        """,
+        (release_id, Jsonb(filters_snapshot), total_bytes),
+    ).fetchone()
+    assert row is not None
+    return int(row[0]), True
+
+
+def claim_filter_analysis_job(conn: psycopg.Connection) -> dict | None:
+    with conn.transaction():
+        row = conn.execute(
+            """
+            SELECT j.id, j.release_id, r.collection, r.release_identifier,
+                   j.filters_snapshot, j.total_bytes
+            FROM filter_analysis_jobs j
+            JOIN sync_releases r ON r.id = j.release_id
+            WHERE j.status = 'pending'
+            ORDER BY j.id LIMIT 1
+            FOR UPDATE OF j SKIP LOCKED
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            """
+            UPDATE filter_analysis_jobs
+            SET status = 'running', started_at = now(), error_message = NULL,
+                progress_bytes = 0, records_scanned = 0, result_counts = '{}'::jsonb
+            WHERE id = %s
+            """,
+            (row[0],),
+        )
+    keys = (
+        "id", "release_id", "collection", "release_identifier",
+        "filters_snapshot", "total_bytes",
+    )
+    return dict(zip(keys, row, strict=True))
+
+
+def update_filter_analysis_progress(
+    conn: psycopg.Connection, job_id: int, progress_bytes: int, records_scanned: int
+) -> None:
+    conn.execute(
+        """
+        UPDATE filter_analysis_jobs
+        SET progress_bytes = %s, records_scanned = %s
+        WHERE id = %s AND status = 'running'
+        """,
+        (progress_bytes, records_scanned, job_id),
+    )
+
+
+def complete_filter_analysis(
+    conn: psycopg.Connection,
+    job_id: int,
+    release_id: int,
+    filters_snapshot: dict[str, bool],
+    counts: dict[str, int],
+    total_bytes: int,
+    records_scanned: int,
+) -> None:
+    with conn.transaction():
+        for name in filters_snapshot:
+            conn.execute(
+                """
+                INSERT INTO release_subcollection_stats
+                    (release_id, subcollection, matching_records, filter_blocked,
+                     analyzed_at, analysis_job_id)
+                VALUES (%s, %s, %s, %s, now(), %s)
+                ON CONFLICT (release_id, subcollection) DO UPDATE SET
+                    matching_records = EXCLUDED.matching_records,
+                    filter_blocked = EXCLUDED.filter_blocked,
+                    analyzed_at = EXCLUDED.analyzed_at,
+                    analysis_job_id = EXCLUDED.analysis_job_id
+                """,
+                (
+                    release_id, name, counts.get(name, 0),
+                    filters_snapshot[name], job_id,
+                ),
+            )
+        conn.execute(
+            """
+            UPDATE filter_analysis_jobs
+            SET status = 'completed', progress_bytes = %s, records_scanned = %s,
+                result_counts = %s, completed_at = now()
+            WHERE id = %s
+            """,
+            (total_bytes, records_scanned, Jsonb(counts), job_id),
+        )
+
+
+def fail_filter_analysis(conn: psycopg.Connection, job_id: int, error: str) -> None:
+    conn.execute(
+        """
+        UPDATE filter_analysis_jobs
+        SET status = 'failed', error_message = %s, completed_at = now()
+        WHERE id = %s
+        """,
+        (error[:2000], job_id),
+    )
+
+
 def clear_retained_payload_identifier(
     conn: psycopg.Connection, collection: str
 ) -> None:

@@ -31,6 +31,7 @@ class TestSyncStatusJson:
             "collections", "recentReleases", "totalDiscarded",
             "discardAnalysis",
             "importHistory", "subcollectionFilters", "retainedPayloads",
+            "filterAnalysisJobs",
         ):
             assert key in body, f"missing key {key}"
         assert body["activeSync"] is None
@@ -172,6 +173,84 @@ class TestSyncStatusJson:
         )
         assert item["blocked"] is False
         assert item["hasOverride"] is True
+        assert item["effectiveSince"] is not None
+
+    def test_reanalysis_stats_override_import_counter(self, client, db_conn):
+        release_id = db_conn.execute(
+            """
+            INSERT INTO sync_releases
+                (collection, release_identifier, status, discard_reasons)
+            VALUES ('upload_records', 'reanalyzed', 'completed',
+                    '{"blocked_subcollection:aaaaarg": 5}')
+            RETURNING id
+            """
+        ).fetchone()[0]
+        job_id = db_conn.execute(
+            """
+            INSERT INTO filter_analysis_jobs
+                (release_id, status, filters_snapshot, records_scanned, completed_at)
+            VALUES (%s, 'completed', '{"aaaaarg": true}', 100, now())
+            RETURNING id
+            """,
+            (release_id,),
+        ).fetchone()[0]
+        db_conn.execute(
+            """
+            INSERT INTO release_subcollection_stats
+                (release_id, subcollection, matching_records, filter_blocked,
+                 analyzed_at, analysis_job_id)
+            VALUES (%s, 'aaaaarg', 19, true, now(), %s)
+            """,
+            (release_id, job_id),
+        )
+        body = client.get("/api/v1/sync/status").json()
+        item = next(
+            value for value in body["subcollectionFilters"]
+            if value["subcollection"] == "aaaaarg"
+        )
+        assert item["latestFiltered"] == 19
+        assert item["releases"][0]["analyzedAt"] is not None
+        assert body["filterAnalysisJobs"][0]["status"] == "completed"
+
+    def test_filter_analysis_endpoint_queues_retained_release(
+        self, client, db_conn, tmp_path, monkeypatch
+    ):
+        from app.routes import control
+
+        release_id = db_conn.execute(
+            """
+            INSERT INTO sync_releases (collection, release_identifier, status)
+            VALUES ('upload_records', 'retained-release', 'completed') RETURNING id
+            """
+        ).fetchone()[0]
+        db_conn.execute(
+            """
+            INSERT INTO collection_sync_modes
+                (collection, mode, last_imported_identifier)
+            VALUES ('upload_records', 'auto', 'retained-release')
+            """
+        )
+        payload = tmp_path / ".prev" / "upload_records.payload"
+        payload.parent.mkdir()
+        payload.write_bytes(b"payload")
+        monkeypatch.setattr(control, "WORK_DIR", tmp_path)
+        captured = {}
+
+        def fake_enqueue(conn, rid, snapshot, total_bytes):
+            captured.update(release_id=rid, snapshot=snapshot, total_bytes=total_bytes)
+            return 42, True
+
+        monkeypatch.setattr(control, "enqueue_filter_analysis", fake_enqueue)
+        response = client.post(
+            "/api/v1/sync/filter-analysis", json={"release_id": release_id}
+        )
+        assert response.status_code == 202
+        assert response.json() == {
+            "queued": True, "created": True, "id": 42, "releaseId": release_id
+        }
+        assert captured["release_id"] == release_id
+        assert captured["snapshot"]["aaaaarg"] is True
+        assert captured["total_bytes"] == 7
 
     def test_delete_retained_payload(self, client, db_conn, tmp_path, monkeypatch):
         from app.routes import control
@@ -214,6 +293,9 @@ class TestDashboardHtml:
         assert "Status wird geladen" in html
         assert "Import-Leistung" in html
         assert "Filteranalyse" in html
+        assert "Subcollection-Filter hinzufügen" in html
+        assert "toggle-track" in html
+        assert "Werte neu auswerten" in html
 
     def test_dashboard_exempt_from_auth(self, db_conn, monkeypatch):
         monkeypatch.setenv("METADATA_API_KEY", "secret")

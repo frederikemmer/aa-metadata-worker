@@ -42,6 +42,17 @@
   .spark .axis{stroke:var(--line);stroke-width:1}.spark .line{fill:none;stroke:var(--run);stroke-width:2}
   .spark .area{fill:rgba(74,163,224,.12)}
   .switch{white-space:nowrap}
+  .section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+  .section-head h2{margin-bottom:0}
+  .icon-btn{width:28px;height:28px;padding:0;border-radius:7px;font-size:19px;line-height:1}
+  .toggle{position:relative;display:inline-block;width:40px;height:22px;vertical-align:middle}
+  .toggle input{opacity:0;width:0;height:0;position:absolute}
+  .toggle-track{position:absolute;inset:0;border-radius:99px;background:#303945;border:1px solid #46515f;cursor:pointer;transition:.2s}
+  .toggle-track::before{content:'';position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:#a8b2bf;transition:.2s}
+  .toggle input:checked+.toggle-track{background:#174a2b;border-color:#2d8450}
+  .toggle input:checked+.toggle-track::before{transform:translateX(18px);background:var(--ok)}
+  .toggle input:focus-visible+.toggle-track{outline:2px solid var(--accent);outline-offset:2px}
+  .analysis-job{margin-top:10px;padding:9px 11px;border:1px solid var(--line);border-radius:7px;background:#12171d}
   @media(max-width:680px){.perf-layout{grid-template-columns:1fr}}
   .reason-row{padding:10px 0;border-bottom:1px solid var(--line)}
   .reason-row:last-child{border-bottom:none}
@@ -145,7 +156,13 @@
 </section>
 
 <section class="card">
-  <h2>Filteranalyse</h2>
+  <div class="section-head">
+    <h2>Filteranalyse</h2>
+    <div class="ctrl" style="gap:6px">
+      <button class="mode-btn" onclick="reanalyzeFilters()">↻ Werte neu auswerten</button>
+      <button class="icon-btn" onclick="addFilter()" title="Subcollection-Filter hinzufügen" aria-label="Subcollection-Filter hinzufügen">+</button>
+    </div>
+  </div>
   <div id="filter-analysis"><div class="idle">Filtergründe werden geladen…</div></div>
 </section>
 
@@ -364,8 +381,6 @@ async function toggleMode(collection, mode){
 }
 
 async function setFilter(name, blocked){
-  const action = blocked ? 'wieder filtern' : 'beim nächsten Import zulassen';
-  if(!confirm(`${name} ${action}?\n\nDie Änderung gilt ab dem nächsten Import oder Reimport.`)) return;
   try{
     const r = await fetch(`/api/v1/sync/subcollections/${encodeURIComponent(name)}`, {
       method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
@@ -374,6 +389,37 @@ async function setFilter(name, blocked){
     if(!r.ok){ const e=await r.json().catch(()=>({})); toast(e.detail||`HTTP ${r.status}`,false); return; }
     toast(`${name}: ${blocked?'wird gefiltert':'wird zugelassen'}`); queueTick();
   }catch(e){ toast('Netzwerkfehler',false); }
+}
+
+async function addFilter(){
+  const raw=prompt('Name der upload_records-Subcollection (z. B. academia_edu):');
+  if(raw==null) return;
+  const name=raw.trim().toLowerCase();
+  if(!/^[a-z0-9_]{1,80}$/.test(name)){
+    toast('Nur Kleinbuchstaben, Zahlen und Unterstriche sind erlaubt.',false);return;
+  }
+  if((dashboardData?.subcollectionFilters||[]).some(f=>f.subcollection===name)){
+    toast('Dieser Filter ist bereits vorhanden.',false);return;
+  }
+  await setFilter(name,true);
+}
+
+async function reanalyzeFilters(){
+  const payload=(dashboardData?.retainedPayloads||[]).find(
+    p=>p.collection==='upload_records'&&p.available&&p.releaseId);
+  if(!payload){toast('Keine gespeicherte upload_records-Importdatei verfügbar.',false);return;}
+  const active=(dashboardData?.filterAnalysisJobs||[]).find(
+    j=>['pending','running'].includes(j.status));
+  if(active){toast('Eine Filteranalyse läuft bereits.',false);return;}
+  if(!confirm(`Filterwerte für dieses Release vollständig neu auswerten?\n\n${payload.releaseIdentifier}\n${gib(payload.sizeBytes)}\n\nEs wird nur die lokale Datei gelesen. Kein Download, kein Import und keine Änderung an den Metadaten.`)) return;
+  try{
+    const r=await fetch('/api/v1/sync/filter-analysis',{
+      method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},
+      body:JSON.stringify({release_id:payload.releaseId})
+    });
+    if(!r.ok){const e=await r.json().catch(()=>({}));toast(e.detail||`HTTP ${r.status}`,false);return;}
+    toast('Filteranalyse wurde gestartet.');queueTick();
+  }catch(e){toast('Netzwerkfehler',false);}
 }
 
 async function reimportPayload(collection){
@@ -587,14 +633,22 @@ function renderDiscardAnalysis(d){
   const filters = d.subcollectionFilters || [];
   let filterHtml = '';
   if(filters.length){
-    filterHtml = `<div class="small" style="margin-bottom:8px">Die Schätzung betrifft zusätzlichen Datenbankplatz. Der Download wird nicht größer, weil <code>upload_records</code> bereits vollständig vor dem Filtern geladen wird.</div>
-      <table><thead><tr><th>Subcollection</th><th>Status</th><th class="num">Letztes Release</th><th class="num">Gesamt erfasst</th><th class="num">Mehr DB</th><th>Aktion</th></tr></thead><tbody>`+
+    filterHtml = `<div class="small" style="margin-bottom:8px">Treffer zeigen, wie viele Records zur Subcollection gehören – auch bei ausgeschaltetem Filter. Die Schätzung betrifft zusätzlichen Datenbankplatz beim Ausschalten; der Download wird nicht größer, weil <code>upload_records</code> bereits vollständig geladen wird.</div>
+      <table><thead><tr><th>Subcollection</th><th>Filter aktiv</th><th class="num">Treffer letztes Release</th><th class="num">Treffer gesamt</th><th class="num">Mehr DB</th></tr></thead><tbody>`+
       filters.map(f=>`<tr><td><b>${escapeHtml(f.subcollection)}</b>${f.isDefault?'<div class="small">Standardfilter</div>':''}</td>
-        <td>${f.blocked?'<span class="pill p-blocked_storage">Gefiltert</span>':'<span class="pill p-completed">Zugelassen</span>'}</td>
+        <td><label class="toggle" title="${f.blocked?'Filter aktiv':'Filter inaktiv'}"><input type="checkbox" ${f.blocked?'checked':''} onchange="setFilter('${escapeHtml(f.subcollection)}',this.checked)"><span class="toggle-track"></span></label>${f.effectiveSince?`<div class="small">seit ${new Date(f.effectiveSince).toLocaleString('de-DE')}</div>`:''}</td>
         <td class="num">${f.latestFiltered==null?'–':fmt(f.latestFiltered)}</td><td class="num">${fmt(f.totalFiltered)}</td>
-        <td class="num">${f.estimatedAdditionalDbBytes==null?'–':gib(f.estimatedAdditionalDbBytes)}</td>
-        <td><button class="mode-btn ${f.blocked?'':'warn'}" onclick="setFilter('${escapeHtml(f.subcollection)}',${!f.blocked})">${f.blocked?'Zulassen':'Filtern'}</button></td></tr>`).join('')+
+        <td class="num">${f.estimatedAdditionalDbBytes==null?'–':gib(f.estimatedAdditionalDbBytes)}</td></tr>`).join('')+
       `</tbody></table><div class="small" style="margin-top:8px">„–“ bedeutet: Für ältere Imports existiert noch keine Aufschlüsselung. Neue Messwerte werden ab dieser Version erfasst.</div>`;
+  }
+  const jobs=d.filterAnalysisJobs||[];
+  if(jobs.length){
+    const job=jobs[0],pct=job.totalBytes?Math.min(100,job.progressBytes/job.totalBytes*100):0;
+    const labels={pending:'Wartet',running:'Analyse läuft',completed:'Analyse abgeschlossen',failed:'Analyse fehlgeschlagen'};
+    filterHtml+=`<div class="analysis-job"><b>${labels[job.status]||job.status}</b> <span class="small">${escapeHtml(trunc(job.releaseIdentifier,55))}</span>
+      ${['pending','running'].includes(job.status)?`<div class="bar"><div style="width:${pct}%;background:var(--run)"></div></div><div class="small">${gib(job.progressBytes)} / ${gib(job.totalBytes)} (${pct.toFixed(1)} %) · ${fmt(job.recordsScanned)} Records geprüft</div>`:''}
+      ${job.status==='completed'?`<div class="small">${fmt(job.recordsScanned)} Records geprüft · Werte aktualisiert</div>`:''}
+      ${job.errorMessage?`<div class="err">${escapeHtml(job.errorMessage)}</div>`:''}</div>`;
   }
   if(!analysis.length){
     document.getElementById('filter-analysis').innerHTML = filterHtml ||
