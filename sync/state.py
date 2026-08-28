@@ -117,7 +117,8 @@ def ensure_release(
         """
         INSERT INTO sync_releases (collection, release_identifier, btih, source_url, data_size_bytes)
         VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (collection, release_identifier) DO UPDATE SET btih = EXCLUDED.btih
+        ON CONFLICT (collection, release_identifier) DO UPDATE
+            SET btih = COALESCE(EXCLUDED.btih, sync_releases.btih)
         RETURNING id
         """,
         (collection, release_identifier, btih, source_url, data_size_bytes),
@@ -135,14 +136,20 @@ def set_release_status(
 ) -> None:
     assert status in RELEASE_STATUSES
     started = ", started_at = now()" if status == "downloading" else ""
-    import_started = (
-        ", import_started_at = COALESCE(import_started_at, now())" if status == "importing" else ""
-    )
+    import_started = ""
+    if status == "importing":
+        import_started = (
+            ", import_started_at = now()"
+            if reset_counters
+            else ", import_started_at = COALESCE(import_started_at, now())"
+        )
     completed = ", completed_at = now()" if status == "completed" else ""
     counters = (
         ", records_seen = 0, records_inserted = 0, records_updated = 0, "
         "records_skipped = 0, records_discarded = 0, records_failed = 0, "
-        "import_done_bytes = 0, import_total_bytes = 0, import_started_at = NULL, "
+        "import_done_bytes = 0, import_total_bytes = 0"
+        + ("" if status == "importing" else ", import_started_at = NULL")
+        + ", "
         "discard_reasons = '{}'::jsonb, discard_samples = '{}'::jsonb"
         if reset_counters
         else ""
@@ -156,6 +163,11 @@ def set_release_status(
         """,
         (status, error_message, release_id),
     )
+    if reset_counters:
+        conn.execute(
+            "DELETE FROM import_performance_buckets WHERE release_id = %s",
+            (release_id,),
+        )
 
 
 def update_release_counters(
@@ -181,6 +193,7 @@ def update_release_counters(
         """,
         (seen, inserted, updated, skipped, discarded, failed, release_id),
     )
+    record_import_sample(conn, release_id)
 
 
 def update_discard_analysis(
@@ -239,6 +252,77 @@ def update_import_progress(
     conn.execute(
         "UPDATE sync_releases SET import_done_bytes = %s, import_total_bytes = %s WHERE id = %s",
         (done_bytes, total_bytes, release_id),
+    )
+    record_import_sample(conn, release_id)
+
+
+def record_import_sample(conn: psycopg.Connection, release_id: int) -> None:
+    """Roll live counters into durable five-minute performance buckets."""
+    conn.execute(
+        """
+        INSERT INTO import_performance_buckets (
+            release_id, bucket_start, first_sample_at, last_sample_at,
+            first_records_seen, last_records_seen, first_bytes, last_bytes
+        )
+        SELECT id,
+               date_bin('5 minutes', now(), TIMESTAMPTZ '2001-01-01'),
+               now(), now(), records_seen, records_seen,
+               import_done_bytes, import_done_bytes
+        FROM sync_releases WHERE id = %s
+        ON CONFLICT (release_id, bucket_start) DO UPDATE SET
+            last_sample_at = EXCLUDED.last_sample_at,
+            last_records_seen = EXCLUDED.last_records_seen,
+            last_bytes = EXCLUDED.last_bytes
+        """,
+        (release_id,),
+    )
+
+
+def get_subcollection_filter_overrides(
+    conn: psycopg.Connection,
+) -> dict[str, bool]:
+    rows = conn.execute(
+        "SELECT subcollection, blocked FROM upload_subcollection_filters"
+    ).fetchall()
+    return {str(row[0]): bool(row[1]) for row in rows}
+
+
+def effective_upload_blocked_subcollections(
+    conn: psycopg.Connection, defaults: list[str]
+) -> list[str]:
+    blocked = set(defaults)
+    for subcollection, is_blocked in get_subcollection_filter_overrides(conn).items():
+        if is_blocked:
+            blocked.add(subcollection)
+        else:
+            blocked.discard(subcollection)
+    return sorted(blocked)
+
+
+def set_subcollection_filter(
+    conn: psycopg.Connection, subcollection: str, blocked: bool
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO upload_subcollection_filters (subcollection, blocked, updated_at)
+        VALUES (%s, %s, now())
+        ON CONFLICT (subcollection) DO UPDATE
+            SET blocked = EXCLUDED.blocked, updated_at = now()
+        """,
+        (subcollection, blocked),
+    )
+
+
+def clear_retained_payload_identifier(
+    conn: psycopg.Connection, collection: str
+) -> None:
+    conn.execute(
+        """
+        UPDATE collection_sync_modes
+        SET last_imported_identifier = NULL, mode = 'auto', updated_at = now()
+        WHERE collection = %s
+        """,
+        (collection,),
     )
 
 
@@ -318,7 +402,8 @@ def record_imported_release(
         INSERT INTO collection_sync_modes (collection, mode, last_imported_identifier, updated_at)
         VALUES (%s, 'auto', %s, now())
         ON CONFLICT (collection) DO UPDATE
-            SET last_imported_identifier = EXCLUDED.last_imported_identifier, updated_at = now()
+            SET mode = 'auto', last_imported_identifier = EXCLUDED.last_imported_identifier,
+                updated_at = now()
         """,
         (collection, release_identifier),
     )

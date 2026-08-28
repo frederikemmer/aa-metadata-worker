@@ -48,11 +48,25 @@ source_url                       .torrent-Download-URL
 data_size_bytes                  komprimierte Payloadgröße aus dem Manifest
 status                           discovered|downloading|importing|validating|
                                  completed|failed|blocked_storage
-discovered_at/started_at/completed_at
+discovered_at/started_at/import_started_at/completed_at
 records_seen/inserted/updated/skipped/discarded/failed
 download_done_bytes/download_total_bytes   (Live-Torrent-Fortschritt fürs Dashboard)
+import_done_bytes/import_total_bytes        (Live-Import-Fortschritt)
+discard_reasons/discard_samples             (begrenzte Filteranalyse als JSONB)
 error_message
 ```
+
+### import_performance_buckets
+
+Dauerhafte 5-Minuten-Messpunkte je Release. Gespeichert werden erster und
+letzter Zeitstempel sowie Record-/Byte-Zähler des Fensters; daraus berechnet die
+Status-API den 12-Stunden-Verlauf. Der Index auf `bucket_start DESC` bedient
+genau diese zeitbegrenzte Dashboard-Abfrage.
+
+### upload_subcollection_filters
+
+Persistente Admin-Overrides (`subcollection`, `blocked`, `updated_at`) für die
+in der Compose-Konfiguration definierten `upload_records`-Standardfilter.
 
 ### schema_migrations
 

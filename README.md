@@ -103,8 +103,9 @@ Containername erreicht.
 
 * aktiver Sync: Phase (Download/Import/Validierung), Fortschrittsbalken,
   Zähler (gesehen/neu/aktualisiert/übersprungen/verworfen/Fehler)
-* Import-Leistung mit Records/s, Datenrate, Laufzeit, ETA und Release-Historie
-* Filteranalyse nach Verwerfungsgrund mit wenigen repräsentativen Metadaten-Beispielen
+* Import-Leistung mit stabilem Mittelwert, 5-Minuten-Messpunkten und 12-Stunden-Graph
+* bearbeitbare `upload_records`-Subcollection-Filter samt Filtermenge und geschätztem DB-Mehrbedarf
+* manuell verwaltete lokale Payloads für Reimport und Delta-Downloads
 * Collections-Übersicht mit letztem Release-Status
 * Storage-Budget-Balken gegen Warn/Stopp-Grenzen
 * die letzten Releases inklusive Fehlermeldungen
@@ -215,8 +216,9 @@ durchgeführt).
   Vor jedem Download/Import prüft der Storage-Guard und blockiert bei
   Überschreiten von `STORAGE_STOP_GIB` (Release wird als `blocked_storage`
   markiert, nichts wird beschädigt).
-* Payloads (.zst) sind temporär: Nach erfolgreichem Import wird die Datei
-  gelöscht. Nie dauerhaft Rohdaten neben der DB halten.
+* Erfolgreiche Payloads werden unter `sync_work/.prev` als Delta-Basis und für
+  Reimports behalten. Sie werden ausschließlich manuell im Dashboard gelöscht;
+  danach benötigt das nächste kumulative Release gegebenenfalls einen Full-Download.
 * Bericht: `python -m sync.cli storage-report` (Bytes/Record, Projektion @30M).
 
 ## 12. Backup

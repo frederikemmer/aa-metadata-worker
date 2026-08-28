@@ -37,6 +37,12 @@
   .perf-item{background:#12171d;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
   .perf-item b{display:block;margin-bottom:4px}
   .perf-item .big{font-size:18px}
+  .perf-layout{display:grid;grid-template-columns:minmax(190px,.7fr) minmax(260px,1.3fr);gap:12px;align-items:center}
+  .spark{width:100%;height:90px;display:block}
+  .spark .axis{stroke:var(--line);stroke-width:1}.spark .line{fill:none;stroke:var(--run);stroke-width:2}
+  .spark .area{fill:rgba(74,163,224,.12)}
+  .switch{white-space:nowrap}
+  @media(max-width:680px){.perf-layout{grid-template-columns:1fr}}
   .reason-row{padding:10px 0;border-bottom:1px solid var(--line)}
   .reason-row:last-child{border-bottom:none}
   .reason-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
@@ -141,6 +147,11 @@
 <section class="card">
   <h2>Filteranalyse</h2>
   <div id="filter-analysis"><div class="idle">Filtergründe werden geladen…</div></div>
+</section>
+
+<section class="card">
+  <h2>Gespeicherte Importdateien</h2>
+  <div id="payloads"><div class="idle">Payloads werden geladen…</div></div>
 </section>
 
 <section class="card">
@@ -292,10 +303,14 @@ function trackImport(a){
   if(seconds < 12) return null;
   const bytesPerSecond = (done-first.done)/seconds;
   const recordsPerSecond = (seen-first.seen)/seconds;
+  if(bytesPerSecond > 0 || recordsPerSecond > 0){
+    tracker.lastGood = {bytesPerSecond, recordsPerSecond, windowSeconds:seconds};
+  }
   const remaining = Math.max(0, (a.importTotalBytes||0)-done);
   return {
     bytesPerSecond, recordsPerSecond, windowSeconds:seconds,
     stalled: bytesPerSecond <= 0 && recordsPerSecond <= 0,
+    lastGood: tracker.lastGood || null,
     stagnantSeconds: (now-tracker.lastChange)/1000,
     etaSeconds: bytesPerSecond > 0 && remaining > 0 ? remaining/bytesPerSecond : 0
   };
@@ -346,6 +361,40 @@ async function toggleMode(collection, mode){
     toast(`${collection}: Modus → ${target}`);
     queueTick();
   }catch(e){ toast('Netzwerkfehler', false); }
+}
+
+async function setFilter(name, blocked){
+  const action = blocked ? 'wieder filtern' : 'beim nächsten Import zulassen';
+  if(!confirm(`${name} ${action}?\n\nDie Änderung gilt ab dem nächsten Import oder Reimport.`)) return;
+  try{
+    const r = await fetch(`/api/v1/sync/subcollections/${encodeURIComponent(name)}`, {
+      method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
+      body:JSON.stringify({blocked})
+    });
+    if(!r.ok){ const e=await r.json().catch(()=>({})); toast(e.detail||`HTTP ${r.status}`,false); return; }
+    toast(`${name}: ${blocked?'wird gefiltert':'wird zugelassen'}`); queueTick();
+  }catch(e){ toast('Netzwerkfehler',false); }
+}
+
+async function reimportPayload(collection){
+  if(!confirm(`${collection} aus der gespeicherten Importdatei erneut importieren?\n\nEs gelten die aktuell eingestellten Filter. Der nächste Sync-Lauf wird dafür vorgemerkt.`)) return;
+  try{
+    const mode = await fetch(`/api/v1/sync/collections/${encodeURIComponent(collection)}/mode`, {
+      method:'POST', headers:{'Content-Type':'application/json', ...authHeaders()},
+      body:JSON.stringify({mode:'import'})
+    });
+    if(!mode.ok){ const e=await mode.json().catch(()=>({})); toast(e.detail||`HTTP ${mode.status}`,false); return; }
+    await sendCommand('run_now');
+  }catch(e){ toast('Netzwerkfehler',false); }
+}
+
+async function deletePayload(collection, size){
+  if(!confirm(`${collection}: gespeicherte Importdatei (${size}) wirklich löschen?\n\nDanach ist kein lokaler Reimport möglich. Beim nächsten neuen Release muss der vollständige kumulative Torrent neu geladen werden.`)) return;
+  try{
+    const r=await fetch(`/api/v1/sync/payloads/${encodeURIComponent(collection)}`, {method:'DELETE',headers:authHeaders()});
+    if(!r.ok){ const e=await r.json().catch(()=>({})); toast(e.detail||`HTTP ${r.status}`,false); return; }
+    toast(`${collection}: Importdatei gelöscht`); queueTick();
+  }catch(e){ toast('Netzwerkfehler',false); }
 }
 
 document.getElementById('btn-run').onclick = () => {
@@ -450,6 +499,7 @@ function render(d){
 
   renderPerformance(d);
   renderDiscardAnalysis(d);
+  renderPayloads(d);
 }
 
 function importMetrics(release){
@@ -472,9 +522,11 @@ function renderPerformance(d){
       const m = importMetrics(r);
       const live = trackImport(r);
       if(live?.stalled){
+        const fallback = live.lastGood || m;
         return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
-          <div class="big" style="color:var(--warn)">Kein Fortschritt</div>
-          <div class="small">Live-Messung: seit ${fmtDuration(live.stagnantSeconds)} keine neuen Bytes oder Records.</div></div>`;
+          <div class="big">Ø ${fmt(Math.round(fallback.recordsPerSecond||0))} Records/s</div>
+          <div class="small">${scaleBytes(fallback.bytesPerSecond||0)}/s · ${live.lastGood?'letzter gleitender Mittelwert':'Mittelwert seit Importstart'}</div>
+          <div class="small" style="color:var(--warn)">Aktuell seit ${fmtDuration(live.stagnantSeconds)} kein Fortschritt.</div></div>`;
       }
       if(live){
         return `<div class="perf-item"><b>${escapeHtml(r.collection)}</b>
@@ -490,6 +542,21 @@ function renderPerformance(d){
         <div class="small">${scaleBytes(m.bytesPerSecond)}/s · Live-Messung wird ermittelt · ETA ${fmtEta(m.etaSeconds)}${r.importTimingEstimated?' · Schätzung ab Laufstart':''}</div></div>`;
     }).join('') + '</div>';
   }
+  const grouped = {};
+  for(const point of (d.importHistory||[])) (grouped[point.collection] ||= []).push(point);
+  const graphs = Object.entries(grouped).map(([collection,points])=>{
+    const values=points.map(p=>p.recordsPerSecond), max=Math.max(...values,1);
+    const coords=values.map((v,i)=>`${values.length===1?50:i/(values.length-1)*100},${78-v/max*68}`);
+    const weighted=points.reduce((s,p)=>s+p.recordsPerSecond*p.sampleSeconds,0)/Math.max(1,points.reduce((s,p)=>s+p.sampleSeconds,0));
+    const area=`0,78 ${coords.join(' ')} 100,78`;
+    return `<div class="perf-item perf-layout"><div><b>${escapeHtml(collection)} · letzte 12 Std.</b>
+      <div class="big">Ø ${fmt(Math.round(weighted))} Records/s</div>
+      <div class="small">5-Minuten-Fenster · Spitze ${fmt(Math.round(max))}</div></div>
+      <svg class="spark" viewBox="0 0 100 82" preserveAspectRatio="none" role="img" aria-label="Importgeschwindigkeit der letzten 12 Stunden">
+        <line class="axis" x1="0" y1="78" x2="100" y2="78"/><polygon class="area" points="${area}"/><polyline class="line" points="${coords.join(' ')}"/>
+      </svg></div>`;
+  }).join('');
+  if(graphs) html += `<div class="perf-grid" style="grid-template-columns:1fr">${graphs}</div>`;
   if(history.length){
     html += `<table><thead><tr><th>Release</th><th>Status</th><th class="num">Laufzeit</th>
       <th class="num">Records/s</th><th class="num">Daten/s</th></tr></thead><tbody>` +
@@ -517,13 +584,25 @@ function discardReasonLabel(reason){
 
 function renderDiscardAnalysis(d){
   const analysis = d.discardAnalysis || [];
+  const filters = d.subcollectionFilters || [];
+  let filterHtml = '';
+  if(filters.length){
+    filterHtml = `<div class="small" style="margin-bottom:8px">Die Schätzung betrifft zusätzlichen Datenbankplatz. Der Download wird nicht größer, weil <code>upload_records</code> bereits vollständig vor dem Filtern geladen wird.</div>
+      <table><thead><tr><th>Subcollection</th><th>Status</th><th class="num">Letztes Release</th><th class="num">Gesamt erfasst</th><th class="num">Mehr DB</th><th>Aktion</th></tr></thead><tbody>`+
+      filters.map(f=>`<tr><td><b>${escapeHtml(f.subcollection)}</b>${f.isDefault?'<div class="small">Standardfilter</div>':''}</td>
+        <td>${f.blocked?'<span class="pill p-blocked_storage">Gefiltert</span>':'<span class="pill p-completed">Zugelassen</span>'}</td>
+        <td class="num">${f.latestFiltered==null?'–':fmt(f.latestFiltered)}</td><td class="num">${fmt(f.totalFiltered)}</td>
+        <td class="num">${f.estimatedAdditionalDbBytes==null?'–':gib(f.estimatedAdditionalDbBytes)}</td>
+        <td><button class="mode-btn ${f.blocked?'':'warn'}" onclick="setFilter('${escapeHtml(f.subcollection)}',${!f.blocked})">${f.blocked?'Zulassen':'Filtern'}</button></td></tr>`).join('')+
+      `</tbody></table><div class="small" style="margin-top:8px">„–“ bedeutet: Für ältere Imports existiert noch keine Aufschlüsselung. Neue Messwerte werden ab dieser Version erfasst.</div>`;
+  }
   if(!analysis.length){
-    document.getElementById('filter-analysis').innerHTML =
-      '<div class="idle">Noch keine aufgeschlüsselten Filtergründe. Bereits vorhandene Gesamtzähler bleiben erhalten; Details werden ab dem nächsten Importfortschritt erfasst.</div>';
+    document.getElementById('filter-analysis').innerHTML = filterHtml ||
+      '<div class="idle">Noch keine aufgeschlüsselten Filtergründe. Details werden ab dem nächsten Importfortschritt erfasst.</div>';
     return;
   }
   const knownTotal = analysis.reduce((sum, item)=>sum+item.count, 0);
-  document.getElementById('filter-analysis').innerHTML = analysis.map(item=>{
+  document.getElementById('filter-analysis').innerHTML = filterHtml + '<details style="margin-top:12px"><summary>Alle Filtergründe und Beispiele</summary>' + analysis.map(item=>{
     const percent = knownTotal ? item.count/knownTotal*100 : 0;
     const samples = (item.samples||[]).map(sample=>{
       const title = sample.title || '(kein Titel)';
@@ -536,7 +615,17 @@ function renderDiscardAnalysis(d){
       <span><b>${fmt(item.count)}</b> <span class="small">(${percent.toFixed(1)}%)</span></span></div>
       <div class="bar"><div style="width:${Math.max(percent,.4)}%;background:var(--warn)"></div></div>
       ${samples ? `<details><summary>${item.samples.length} Beispiel${item.samples.length===1?'':'e'} anzeigen</summary>${samples}</details>` : ''}</div>`;
-  }).join('');
+  }).join('') + '</details>';
+}
+
+function renderPayloads(d){
+  const payloads=d.retainedPayloads||[];
+  document.getElementById('payloads').innerHTML = `<div class="small" style="margin-bottom:8px">Erfolgreiche Payloads bleiben gespeichert, bis du sie hier manuell löschst. Sie ermöglichen lokale Reimports und dienen als Delta-Basis für neue kumulative Releases.</div>
+    <table><thead><tr><th>Collection</th><th>Status</th><th class="num">Größe</th><th>Release</th><th>Aktionen</th></tr></thead><tbody>`+
+    payloads.map(p=>`<tr><td><b>${escapeHtml(p.collection)}</b></td><td>${p.available?'<span class="pill p-completed">Gespeichert</span>':'<span class="pill p-not_discovered">Nicht vorhanden</span>'}</td>
+      <td class="num">${p.available?gib(p.sizeBytes):'–'}</td><td class="small">${escapeHtml(trunc(p.releaseIdentifier,42))||'–'}</td>
+      <td class="switch"><button class="mode-btn primary" ${p.available?'':'disabled'} onclick="reimportPayload('${escapeHtml(p.collection)}')">Neu importieren</button> <button class="mode-btn warn" ${p.available?'':'disabled'} onclick="deletePayload('${escapeHtml(p.collection)}','${p.available?gib(p.sizeBytes):''}')">Löschen</button></td></tr>`).join('')+
+    '</tbody></table>';
 }
 
 async function fetchJson(url){

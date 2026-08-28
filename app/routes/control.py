@@ -6,6 +6,8 @@ through the bearer middleware (protected when METADATA_API_KEY is set).
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Literal
 
 import psycopg
@@ -15,15 +17,19 @@ from pydantic import BaseModel
 from app.deps import GetConnectionDependency, GetSettingsDependency
 from common.config import Settings
 from sync.state import (
+    clear_retained_payload_identifier,
     enqueue_command,
     is_paused,
     last_command,
     set_collection_mode,
     set_paused,
+    set_subcollection_filter,
 )
 from sync.worker import next_scheduled_run
 
 router = APIRouter(tags=["sync-control"])
+WORK_DIR = Path("/work/sync")
+_SUBCOLLECTION_RE = re.compile(r"^[a-z0-9_]{1,80}$")
 
 
 class SyncCommandRequest(BaseModel):
@@ -35,6 +41,10 @@ class CollectionModeRequest(BaseModel):
     mode: Literal["auto", "import"]
 
     model_config = {"json_schema_extra": {"examples": [{"mode": "import"}]}}
+
+
+class SubcollectionFilterRequest(BaseModel):
+    blocked: bool
 
 
 @router.get("/api/v1/sync/collections/{collection}/mode")
@@ -66,6 +76,35 @@ def set_collection_sync_mode(
         )
     set_collection_mode(conn, collection, request.mode)
     return {"collection": collection, "mode": request.mode, "queued": True}
+
+
+@router.post("/api/v1/sync/subcollections/{subcollection}", status_code=200)
+def set_upload_subcollection_filter(
+    subcollection: str,
+    request: SubcollectionFilterRequest,
+    conn: psycopg.Connection = GetConnectionDependency,
+) -> dict:
+    if not _SUBCOLLECTION_RE.fullmatch(subcollection):
+        raise HTTPException(status_code=400, detail="Invalid subcollection name.")
+    set_subcollection_filter(conn, subcollection, request.blocked)
+    return {"subcollection": subcollection, "blocked": request.blocked}
+
+
+@router.delete("/api/v1/sync/payloads/{collection}", status_code=200)
+def delete_retained_payload(
+    collection: str,
+    conn: psycopg.Connection = GetConnectionDependency,
+    settings: Settings = GetSettingsDependency,
+) -> dict:
+    if collection not in settings.aa_collections:
+        raise HTTPException(status_code=400, detail="Collection is not active.")
+    payload = WORK_DIR / ".prev" / f"{collection}.payload"
+    if not payload.is_file():
+        raise HTTPException(status_code=404, detail="No retained payload found.")
+    deleted_bytes = payload.stat().st_size
+    payload.unlink()
+    clear_retained_payload_identifier(conn, collection)
+    return {"deleted": True, "collection": collection, "deletedBytes": deleted_bytes}
 
 
 @router.get("/api/v1/sync/control")

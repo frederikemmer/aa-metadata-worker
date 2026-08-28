@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -28,6 +30,7 @@ class TestSyncStatusJson:
             "storageWarnGib", "storageStopGib", "activeSync",
             "collections", "recentReleases", "totalDiscarded",
             "discardAnalysis",
+            "importHistory", "subcollectionFilters", "retainedPayloads",
         ):
             assert key in body, f"missing key {key}"
         assert body["activeSync"] is None
@@ -35,6 +38,9 @@ class TestSyncStatusJson:
         # Configured collections are always listed (even without releases).
         names = {c["collection"] for c in body["collections"]}
         assert names == {"zlib3_records", "upload_records"}
+        filters = {item["subcollection"]: item for item in body["subcollectionFilters"]}
+        assert filters["aaaaarg"]["blocked"] is True
+        assert filters["aaaaarg"]["latestFiltered"] is None
 
     def test_inactive_release_is_hidden(self, client, db_conn):
         db_conn.execute(
@@ -122,6 +128,74 @@ class TestSyncStatusJson:
                 ],
             }
         ]
+
+    def test_import_history_and_subcollection_stats(self, client, db_conn):
+        release_id = db_conn.execute(
+            """
+            INSERT INTO sync_releases
+                (collection, release_identifier, status, records_seen,
+                 import_done_bytes, discard_reasons, discovered_at)
+            VALUES ('upload_records', 'filters', 'importing', 600, 9000,
+                    '{"blocked_subcollection:aaaaarg": 25}', now())
+            RETURNING id
+            """
+        ).fetchone()[0]
+        db_conn.execute(
+            """
+            INSERT INTO import_performance_buckets
+                (release_id, bucket_start, first_sample_at, last_sample_at,
+                 first_records_seen, last_records_seen, first_bytes, last_bytes)
+            VALUES (%s, date_bin('5 minutes', now(), TIMESTAMPTZ '2001-01-01'),
+                    now() - interval '60 seconds', now(), 0, 600, 0, 9000)
+            """,
+            (release_id,),
+        )
+        body = client.get("/api/v1/sync/status").json()
+        assert body["importHistory"][0]["recordsPerSecond"] == 10
+        item = next(
+            value for value in body["subcollectionFilters"]
+            if value["subcollection"] == "aaaaarg"
+        )
+        assert item["latestFiltered"] == 25
+        assert item["totalFiltered"] == 25
+        assert item["releases"] == [{"releaseIdentifier": "filters", "count": 25}]
+
+    def test_subcollection_filter_override_round_trip(self, client):
+        response = client.post(
+            "/api/v1/sync/subcollections/aaaaarg", json={"blocked": False}
+        )
+        assert response.status_code == 200
+        body = client.get("/api/v1/sync/status").json()
+        item = next(
+            value for value in body["subcollectionFilters"]
+            if value["subcollection"] == "aaaaarg"
+        )
+        assert item["blocked"] is False
+        assert item["hasOverride"] is True
+
+    def test_delete_retained_payload(self, client, db_conn, tmp_path, monkeypatch):
+        from app.routes import control
+
+        payload = tmp_path / ".prev" / "upload_records.payload"
+        payload.parent.mkdir()
+        payload.write_bytes(b"payload")
+        db_conn.execute(
+            """
+            INSERT INTO collection_sync_modes
+                (collection, mode, last_imported_identifier)
+            VALUES ('upload_records', 'import', 'release-1')
+            """
+        )
+        monkeypatch.setattr(control, "WORK_DIR", Path(tmp_path))
+        response = client.delete("/api/v1/sync/payloads/upload_records")
+        assert response.status_code == 200
+        assert response.json()["deletedBytes"] == 7
+        assert not payload.exists()
+        row = db_conn.execute(
+            "SELECT mode, last_imported_identifier FROM collection_sync_modes "
+            "WHERE collection = 'upload_records'"
+        ).fetchone()
+        assert row == ("auto", None)
 
 
 class TestDashboardHtml:

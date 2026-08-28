@@ -500,9 +500,15 @@ Ab Schema v8 enthalten Releases außerdem `importStartedAt`,
 Für ältere laufende Releases ohne `importStartedAt` basiert die Dauer auf
 `startedAt` und wird mit `importTimingEstimated=true` gekennzeichnet.
 Das Dashboard ersetzt diese Startschätzung nach zwölf Sekunden durch eine
-gleitende Live-Rate und kennzeichnet ausbleibenden Byte- und Record-Fortschritt.
+gleitende Live-Rate. Bei Stillstand bleibt der letzte beziehungsweise gesamte
+Mittelwert sichtbar; ein separater Hinweis nennt die Dauer ohne Fortschritt.
 Top-Level `discardAnalysis` aggregiert die Filtergründe über die aktiven
 Collections; je Grund werden höchstens drei kompakte Beispiele ausgegeben.
+
+Ab Schema v9 enthält `importHistory` persistente 5-Minuten-Fenster der letzten
+12 Stunden. `subcollectionFilters` kombiniert Compose-Defaults, persistente
+Overrides, Filtermengen je Release und eine ungefähre DB-Platzprojektion.
+`retainedPayloads` listet ausschließlich die bekannten `.prev`-Payloadpfade.
 
 Top-Level `appVersion` enthält den beim Docker-Build eingebrannten Git-Commit
 (`APP_VERSION` build-arg, lokal `"dev"`). Das Dashboard zeigt ihn neben der
@@ -532,6 +538,12 @@ Response: `{ "queued": true, "id": 123, "action": "run_now" }`
 Worker pollt `sync_commands` alle 10 Sekunden.
 
 ### 7.9 Bearer-Auth
+
+Weitere geschützte Admin-Endpunkte:
+
+* `POST /api/v1/sync/subcollections/{name}` mit `{ "blocked": true|false }`
+* `POST /api/v1/sync/collections/{collection}/mode` mit `{ "mode": "import" }`
+* `DELETE /api/v1/sync/payloads/{collection}` für die manuelle Payload-Löschung
 
 Nur aktiv wenn `METADATA_API_KEY` gesetzt. Vergleich via `hmac.compare_digest`.
 Auth-exempt: Health, sync/status, sync/control, Dashboard, OpenAPI.

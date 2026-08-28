@@ -238,13 +238,41 @@ class TestRunSyncFlows:
         assert summary1.processed and summary1.failed == []
         total = db_conn.execute("SELECT COUNT(*) FROM metadata_records").fetchone()[0]
         assert total == 1
-        # payload deleted after success
+        # The release-named working file is gone; retained payload lives in .prev.
         assert not list(tmp_path.glob("*.zst"))
+        assert (tmp_path / ".prev" / "zlib3_records.payload").is_file()
 
         # Second run: release known -> skipped, no re-import.
         summary2 = run_sync(collections=["zlib3_records"], force=False, settings=settings, work_dir=tmp_path)
         assert summary2.skipped_completed == ["zlib3_records"]
         assert summary2.processed == []
+
+    def test_import_mode_reimports_retained_payload_without_torrent(
+        self, db_conn, tmp_path, monkeypatch
+    ):
+        lines = [
+            '{"aacid":"aacid__zlib3_records__20250101T000000Z__9__Z","metadata":'
+            '{"md5_reported":"' + "3" * 32 + '","title":"Local Reimport","extension":"epub"}}'
+        ]
+        FakeTorrentClient.payloads = {_RELEASE_IDENTIFIER: lines}
+        self._fake_manifest(monkeypatch)
+        settings = load_settings()
+        run_sync(
+            collections=["zlib3_records"], settings=settings, work_dir=tmp_path
+        )
+        state.set_collection_mode(db_conn, "zlib3_records", "import")
+
+        class TorrentMustNotStart:
+            def __init__(self, *_args, **_kwargs):
+                raise AssertionError("local reimport must not start libtorrent")
+
+        monkeypatch.setattr("sync.run.TorrentClient", TorrentMustNotStart)
+        summary = run_sync(
+            collections=["zlib3_records"], settings=settings, work_dir=tmp_path
+        )
+        assert summary.processed == [("zlib3_records", _RELEASE_IDENTIFIER)]
+        assert state.get_collection_mode(db_conn, "zlib3_records").mode == "auto"
+        assert (tmp_path / ".prev" / "zlib3_records.payload").is_file()
 
     def test_release_override_pins_specific_release(self, db_conn, tmp_path, monkeypatch):
         names = [

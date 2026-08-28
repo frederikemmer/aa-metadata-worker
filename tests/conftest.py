@@ -99,7 +99,8 @@ def db_conn(postgres_docker) -> psycopg.Connection:
     yield conn
     # Wipe all data so each test starts clean without recreating the container.
     conn.execute(
-        "TRUNCATE metadata_records, sync_releases, collection_sync_modes "
+        "TRUNCATE metadata_records, sync_releases, collection_sync_modes, "
+        "upload_subcollection_filters "
         "RESTART IDENTITY CASCADE"
     )
     conn.close()

@@ -16,7 +16,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import psycopg
@@ -24,7 +24,7 @@ import psycopg
 from common.config import Settings, load_settings
 from common.db import apply_migrations, connect
 from sync import state
-from sync.discovery import fetch_manifest, find_release, latest_releases
+from sync.discovery import ReleaseInfo, fetch_manifest, find_release, latest_releases
 from sync.importer import (
     GracefulShutdown,
     delete_payload,
@@ -179,8 +179,16 @@ def _import_payload(
         )
         logger.info("%s", decision.message)
 
+        import_settings = settings
+        if collection == "upload_records":
+            import_settings = replace(
+                settings,
+                upload_blocked_subcollections=state.effective_upload_blocked_subcollections(
+                    conn, settings.upload_blocked_subcollections
+                ),
+            )
         stats = import_release(
-            conn, collection, payload_path, release_id, settings, resilient=resilient
+            conn, collection, payload_path, release_id, import_settings, resilient=resilient
         )
         validate_import(conn, release_id, stats)
         status_note = " (partial — some pieces missing)" if resilient else ""
@@ -356,11 +364,50 @@ def run_sync(
             # -- Phase 1: Discovery, skip completed, storage guard -----------
 
             to_download: dict[str, dict] = {}
+            to_import_local: dict[str, dict] = {}
             modes = state.get_collection_modes(conn)
 
             for collection in wanted_collections:
                 release = releases.get(collection)
                 if release is None:
+                    continue
+
+                mode = modes.get(collection)
+                retained_payload = _prev_payload_path(work_dir, collection)
+                if (
+                    mode is not None
+                    and mode.mode == "import"
+                    and mode.last_imported_identifier
+                    and retained_payload.is_file()
+                ):
+                    retained_release = ReleaseInfo(
+                        collection=collection,
+                        identifier=mode.last_imported_identifier,
+                        btih="",
+                        torrent_url="",
+                        magnet_link="",
+                        data_size_bytes=retained_payload.stat().st_size,
+                    )
+                    retained_release_id = state.ensure_release(
+                        conn,
+                        collection,
+                        retained_release.identifier,
+                        None,
+                        None,
+                        retained_release.data_size_bytes,
+                    )
+                    logger.info(
+                        "[%s] Re-importing retained payload with current filters.",
+                        collection,
+                    )
+                    state.set_release_status(
+                        conn, retained_release_id, "importing", reset_counters=True
+                    )
+                    to_import_local[collection] = {
+                        "release": retained_release,
+                        "release_id": retained_release_id,
+                        "payload": retained_payload,
+                    }
                     continue
 
                 release_id = state.ensure_release(
@@ -401,7 +448,19 @@ def run_sync(
                     "release_id": release_id,
                 }
 
-            # -- Phase 2: Download (parallel or sequential) -------------------
+            # -- Phase 2: One-shot local reimports, then downloads ------------
+            for collection, info in to_import_local.items():
+                _import_payload(
+                    conn,
+                    collection,
+                    info["payload"],
+                    info,
+                    work_dir,
+                    settings,
+                    summary,
+                )
+
+            # -- Phase 3: Download (parallel or sequential) -------------------
             # Each finished download is imported immediately, so completed
             # collections never wait for slower or stalled torrents.
 

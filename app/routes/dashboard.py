@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+from datetime import UTC, datetime
 
 import psycopg
 from fastapi import APIRouter
@@ -132,6 +133,109 @@ def sync_status(
                 if sample not in target:
                     target.append(sample)
 
+    history_rows = conn.execute(
+        """
+        SELECT r.collection, b.bucket_start,
+               EXTRACT(EPOCH FROM (b.last_sample_at - b.first_sample_at)),
+               b.last_records_seen - b.first_records_seen,
+               b.last_bytes - b.first_bytes
+        FROM import_performance_buckets b
+        JOIN sync_releases r ON r.id = b.release_id
+        WHERE b.bucket_start >= now() - interval '12 hours'
+          AND r.collection = ANY(%s)
+        ORDER BY b.bucket_start
+        """,
+        (active_collections,),
+    ).fetchall()
+    import_history = []
+    for collection, bucket_start, seconds, record_delta, byte_delta in history_rows:
+        duration = float(seconds or 0)
+        if duration <= 0:
+            continue
+        import_history.append(
+            {
+                "collection": collection,
+                "bucketStart": bucket_start.isoformat(),
+                "recordsPerSecond": max(0, float(record_delta) / duration),
+                "bytesPerSecond": max(0, float(byte_delta) / duration),
+                "sampleSeconds": duration,
+            }
+        )
+
+    filter_overrides = {
+        row[0]: bool(row[1])
+        for row in conn.execute(
+            "SELECT subcollection, blocked FROM upload_subcollection_filters"
+        ).fetchall()
+    }
+    upload_release_rows = conn.execute(
+        """
+        SELECT release_identifier, discard_reasons
+        FROM sync_releases
+        WHERE collection = 'upload_records'
+        ORDER BY discovered_at DESC
+        LIMIT 12
+        """
+    ).fetchall()
+    filtered_by_name: dict[str, dict] = {}
+    for release_identifier, reasons in upload_release_rows:
+        for reason, count in reasons.items():
+            if not reason.startswith("blocked_subcollection:"):
+                continue
+            name = reason.split(":", 1)[1]
+            entry = filtered_by_name.setdefault(name, {"total": 0, "releases": []})
+            value = int(count)
+            entry["total"] += value
+            entry["releases"].append(
+                {"releaseIdentifier": release_identifier, "count": value}
+            )
+    default_filters = set(settings.upload_blocked_subcollections)
+    filter_names = default_filters | set(filter_overrides) | set(filtered_by_name)
+    avg_db_bytes = int(db_size_row[0]) / max(int(records_row), 1)
+    subcollection_filters = []
+    for name in sorted(filter_names):
+        stats = filtered_by_name.get(name, {"total": 0, "releases": []})
+        latest_count = stats["releases"][0]["count"] if stats["releases"] else None
+        blocked = filter_overrides.get(name, name in default_filters)
+        subcollection_filters.append(
+            {
+                "subcollection": name,
+                "blocked": blocked,
+                "isDefault": name in default_filters,
+                "hasOverride": name in filter_overrides,
+                "latestFiltered": latest_count,
+                "totalFiltered": stats["total"],
+                "estimatedAdditionalDbBytes": (
+                    int(latest_count * avg_db_bytes) if latest_count is not None else None
+                ),
+                "releases": stats["releases"],
+            }
+        )
+
+    modes_by_collection = {
+        row[0]: (row[1], row[2])
+        for row in conn.execute(
+            "SELECT collection, mode, last_imported_identifier FROM collection_sync_modes"
+        ).fetchall()
+    }
+    payloads = []
+    for collection in active_collections:
+        path = pathlib.Path(WORK_DIR) / ".prev" / f"{collection}.payload"
+        stat = path.stat() if path.is_file() else None
+        mode = modes_by_collection.get(collection, ("auto", None))
+        payloads.append(
+            {
+                "collection": collection,
+                "available": stat is not None,
+                "sizeBytes": stat.st_size if stat else 0,
+                "modifiedAt": (
+                    datetime.fromtimestamp(stat.st_mtime, UTC).isoformat()
+                    if stat else None
+                ),
+                "releaseIdentifier": mode[1],
+            }
+        )
+
     try:
         disk_free = shutil.disk_usage(WORK_DIR).free
     except OSError:
@@ -162,6 +266,9 @@ def sync_status(
             }
             for row in discard_reason_rows
         ],
+        "importHistory": import_history,
+        "subcollectionFilters": subcollection_filters,
+        "retainedPayloads": payloads,
         "activeSync": active,
         "collections": collections,
         "recentReleases": [_row_to_release(row) for row in recent_rows],

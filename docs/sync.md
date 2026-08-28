@@ -32,8 +32,9 @@ inkrementeller Update.
 * Die `.torrent`-Datei wird per HTTPS geladen (mit Retries bei Mirror-Fehlern
   wie 502; schlägt alles fehl, Fallback auf den Magnet-Link aus dem Manifest),
   die Payload per BitTorrent (eingebetteter libtorrent-Client im sync-Container).
-* Payload landet in `sync_work` (Volume), wird nach erfolgreichem Import
-  gelöscht. Temporärer Platzbedarf = komprimierte Releasegröße.
+* Payload landet in `sync_work` (Volume) und wird nach erfolgreichem Import als
+  `.prev/<collection>.payload` behalten. Das Dashboard bietet die bewusste,
+  manuelle Löschung an.
 * Kein Web-Scraping, keine Browser-Automatisierung, keine Anti-Bot-Umgehung.
 
 ## Buch-Filterung beim Import („nur Nützliches behalten“)
@@ -54,7 +55,11 @@ Die Anreicherungs-Collections (`goodreads_records`, `gbooks_records`,
 deterministischer synthetischer Hash aus Collection + Quell-ID.
 
 Verworfene Datensätze werden pro Release gezählt (`records_discarded`) und sind
-im Dashboard sichtbar.
+im Dashboard sichtbar. Die Subcollection-Blocklist kann dort über persistente
+Overrides bearbeitet werden. Änderungen gelten ab dem nächsten Import oder
+lokalen Reimport. Die angezeigte GiB-Projektion schätzt zusätzlichen
+PostgreSQL-Platz; der Torrent-Download ist unverändert, weil vor dem Filter
+ohnehin der komplette `upload_records`-Payload vorliegt.
 
 ## Incremental Updates
 
@@ -71,12 +76,14 @@ Stream-Import (status=importing)
    ↓
 Validierung (status=validating): Records gesehen? Fehlerquote ok?
    ↓
-completed + Payload löschen
+completed + Payload als `.prev` behalten
 ```
 
-Ein zweiter Lauf importiert dasselbe Release nie erneut (Vergleich über
-`release_identifier`). Da kumulative Releases alte Records byte-identisch
-enthalten, deckt der neueste Import immer den kompletten Bestand ab.
+Im Auto-Modus wird dasselbe Release nicht erneut importiert. Im Dashboard kann
+ein gespeicherter Payload bewusst einmalig mit den aktuellen Filtern neu
+importiert werden; danach wechselt die Collection zurück auf Auto. Da
+kumulative Releases alte Records byte-identisch enthalten, deckt der neueste
+Import immer den kompletten Bestand ab.
 
 ### Delta-Downloads: nur das Neue herunterladen (`SYNC_REUSE_PREV_PAYLOAD=true`)
 
@@ -125,10 +132,13 @@ docker compose run --rm sync python -m sync.cli run
 
 ## Cleanup
 
-* Payload-Dateien werden unmittelbar nach `completed` bzw. bei `failed` gelöscht.
-* Bleibt nach einem Absturz eine Datei liegen, erkennt sie der nächste
-  Download-Versuch desselben Releases (libtorrent Re-check) oder sie kann manuell
-  aus `${DATA_HOST_DIR}/sync_work` entfernt werden.
+* Erfolgreiche Payloads unter `.prev` werden nie automatisch gelöscht. Das
+  Dashboard zeigt Größe und zugehöriges Release und verlangt vor dem manuellen
+  Löschen eine Bestätigung.
+* Das Löschen entfernt zugleich die gespeicherte Release-Zuordnung und setzt die
+  Collection auf Auto. Ein späterer Sync bleibt korrekt, verliert aber die
+  lokale Delta-Basis und kann deshalb den vollständigen kumulativen Torrent laden.
+* Fehlgeschlagene temporäre Payloads werden weiterhin automatisch bereinigt.
 
 ## Storage Protection
 
