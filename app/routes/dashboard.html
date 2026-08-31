@@ -46,9 +46,25 @@
   .perf-item b{display:block;margin-bottom:4px}
   .perf-item .big{font-size:18px}
   .perf-layout{display:grid;grid-template-columns:minmax(190px,.7fr) minmax(260px,1.3fr);gap:12px;align-items:center}
-  .spark{width:100%;height:90px;display:block}
-  .spark .axis{stroke:var(--line);stroke-width:1}.spark .line{fill:none;stroke:var(--run);stroke-width:2}
-  .spark .area{fill:rgba(74,163,224,.12)}
+  .spark-wrap{position:relative;min-width:0}
+  .spark{width:100%;height:90px;display:block;overflow:visible}
+  .spark .axis{stroke:var(--line);stroke-width:1}
+  .spark .line{fill:none;stroke:var(--run);stroke-width:1.5;vector-effect:non-scaling-stroke}
+  .spark .area{fill:rgba(74,163,224,.07)}
+  .spark .focus-line{stroke:var(--accent);stroke-width:1;stroke-dasharray:2 2;opacity:0;vector-effect:non-scaling-stroke}
+  .spark .focus-point{fill:var(--run);stroke:var(--card);stroke-width:1.5;opacity:0;vector-effect:non-scaling-stroke}
+  .spark.is-active .focus-line,.spark.is-active .focus-point{opacity:1}
+  .spark .hit-area{fill:transparent;cursor:crosshair;outline:none;pointer-events:all}
+  .spark .hit-area:focus-visible{stroke:var(--accent);stroke-width:1;stroke-dasharray:2 2;vector-effect:non-scaling-stroke}
+  .spark-tooltip{position:absolute;top:-7px;left:50%;z-index:2;min-width:145px;max-width:210px;
+    padding:6px 8px;border:1px solid var(--accent);border-radius:6px;background:#101820;
+    box-shadow:0 5px 16px rgba(0,0,0,.35);font-size:11px;line-height:1.35;
+    pointer-events:none;transform:translateX(-50%);white-space:nowrap}
+  .spark-tooltip.edge-left{transform:translateX(0)}
+  .spark-tooltip.edge-right{transform:translateX(-100%)}
+  .spark-tooltip[hidden]{display:none}
+  .spark-tooltip .tooltip-time{color:var(--dim);margin-bottom:2px}
+  .spark-tooltip strong{font-size:12px}
   .switch{white-space:nowrap}
   .section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
   .section-head h2{margin-bottom:0}
@@ -171,7 +187,7 @@
       <th class="num">Verworfen / Fehler</th><th>Payload</th><th>Fertig am</th><th>Modus</th><th>Aktionen</th>
     </tr></thead><tbody><tr><td colspan="8" class="idle">Collections werden geladen…</td></tr></tbody></table>
   </div>
-  <details class="release-logs">
+  <details class="release-logs" data-detail-key="release-logs">
     <summary>Release-Logs</summary>
     <table id="recent"><thead><tr>
       <th>Collection</th><th>Release</th><th>Status</th><th class="num">Gesehen</th><th>Fehlermeldung</th>
@@ -247,6 +263,27 @@ let control = {paused:false, enabled:true};
 let appVersion = null, latestSha = null;
 let dashboardData = null, tickTimer = null, tickRunning = false;
 
+function detailsStateKey(details){
+  if(details.dataset.detailKey) return details.dataset.detailKey;
+  const summary = Array.from(details.children).find(child => child.tagName === 'SUMMARY');
+  return 'summary:' + (summary?.textContent || '').trim();
+}
+
+function captureDetailsOpenState(){
+  const state = new Map();
+  document.querySelectorAll('details').forEach(details => {
+    state.set(detailsStateKey(details), details.open);
+  });
+  return state;
+}
+
+function restoreDetailsOpenState(state){
+  document.querySelectorAll('details').forEach(details => {
+    const key = detailsStateKey(details);
+    if(state.has(key)) details.open = state.get(key);
+  });
+}
+
 // Version display: baked-in build SHA compared against GitHub main (public API,
 // polled rarely to respect the rate limit).
 function renderVersion(){
@@ -270,6 +307,7 @@ async function checkLatestRelease(){
 }
 let dlTrackers = {};   // key -> sliding-window samples, one per running download
 let importTrackers = {}; // key -> recent byte/record samples for true live speed
+let sparklineStates = new Map(); // selected point per performance chart
 
 // Sliding-window download rate (the DB progress counter only updates in
 // intervals, so a short client-side average gives a stable speed + ETA).
@@ -476,6 +514,7 @@ function renderControl(){
 }
 
 function render(d){
+  const openDetails = captureDetailsOpenState();
   dashboardData = d;
   if (!appVersion || appVersion !== d.appVersion){ appVersion = d.appVersion; renderVersion(); }
   const colors=['#4aa3e0','#8b6fd9','#3fb96f','#e2b93b','#d972a7'];
@@ -554,6 +593,7 @@ function render(d){
 
   renderPerformance(d);
   renderDiscardAnalysis(d);
+  restoreDetailsOpenState(openDetails);
 }
 
 function importMetrics(release){
@@ -585,25 +625,166 @@ function activePerformanceHtml(r){
   }else{
     content='<div class="small">Messung beginnt mit dem Import-Start.</div>';
   }
-  return `<details class="active-details"><summary>Import-Leistung</summary><div style="padding-top:7px">${content}</div></details>`;
+  return `<details class="active-details" data-detail-key="active-performance-${encodeURIComponent(String(r.collection))}"><summary>Import-Leistung</summary><div style="padding-top:7px">${content}</div></details>`;
+}
+
+function sparkTimeLabel(value){
+  const date = new Date(value);
+  if(Number.isNaN(date.getTime())) return value || 'Zeitpunkt unbekannt';
+  return date.toLocaleString('de-DE', {dateStyle:'short', timeStyle:'short'});
+}
+
+function sparkPointLabel(point){
+  return sparkTimeLabel(point.bucketStart) + ' · ' +
+    fmt(Math.round(point.recordsPerSecond || 0)) + ' Records/s · ' +
+    scaleBytes(point.bytesPerSecond || 0) + '/s';
+}
+
+function initSparkline(svg, points, chartKey){
+  const hit = svg.querySelector('.hit-area');
+  const focusLine = svg.querySelector('.focus-line');
+  const focusPoint = svg.querySelector('.focus-point');
+  const tooltip = svg.parentElement.querySelector('.spark-tooltip');
+  if(!hit || !focusLine || !focusPoint || !tooltip || !points.length) return;
+
+  const state = sparklineStates.get(chartKey) || {
+    index: 0, visible: false, pointer: false, focused: false
+  };
+  sparklineStates.set(chartKey, state);
+  hit.setAttribute('aria-valuemin', '0');
+  hit.setAttribute('aria-valuemax', String(points.length - 1));
+
+  function showPoint(index){
+    const selected = Math.max(0, Math.min(points.length - 1, index));
+    const point = points[selected];
+    state.index = selected;
+    state.visible = true;
+    svg.classList.add('is-active');
+    focusLine.setAttribute('x1', String(point.x));
+    focusLine.setAttribute('x2', String(point.x));
+    focusPoint.setAttribute('cx', String(point.x));
+    focusPoint.setAttribute('cy', String(point.y));
+    tooltip.innerHTML = '<div class="tooltip-time">' + escapeHtml(sparkTimeLabel(point.bucketStart)) +
+      '</div><strong>' + escapeHtml(fmt(Math.round(point.recordsPerSecond || 0))) +
+      ' Records/s</strong><div class="small">' + escapeHtml(scaleBytes(point.bytesPerSecond || 0)) +
+      '/s</div>';
+    tooltip.classList.toggle('edge-left', point.x < 18);
+    tooltip.classList.toggle('edge-right', point.x > 82);
+    tooltip.hidden = false;
+    hit.setAttribute('aria-valuenow', String(selected));
+    hit.setAttribute('aria-valuetext', sparkPointLabel(point));
+    hit.setAttribute('aria-label', 'Importgeschwindigkeit: ' + sparkPointLabel(point) +
+      '. Mit den Pfeiltasten weitere Zeitpunkte auswählen.');
+  }
+
+  function hidePoint(){
+    state.visible = false;
+    svg.classList.remove('is-active');
+    tooltip.hidden = true;
+  }
+
+  function nearestIndex(event){
+    const bounds = svg.getBoundingClientRect();
+    if(!bounds.width) return state.index;
+    const x = Math.max(0, Math.min(100, (event.clientX - bounds.left) / bounds.width * 100));
+    let nearest = 0, distance = Infinity;
+    points.forEach((point, index) => {
+      const nextDistance = Math.abs(point.x - x);
+      if(nextDistance < distance){
+        nearest = index;
+        distance = nextDistance;
+      }
+    });
+    return nearest;
+  }
+
+  function selectFromPointer(event){
+    state.pointer = true;
+    showPoint(nearestIndex(event));
+  }
+
+  hit.addEventListener('pointerenter', selectFromPointer);
+  hit.addEventListener('pointermove', selectFromPointer);
+  hit.addEventListener('pointerdown', event => {
+    selectFromPointer(event);
+    if(event.pointerType !== 'mouse') event.preventDefault();
+  });
+  hit.addEventListener('pointerleave', event => {
+    if(event.pointerType === 'mouse'){
+      state.pointer = false;
+      if(!state.focused) hidePoint();
+    }
+  });
+  hit.addEventListener('pointercancel', () => {
+    state.pointer = false;
+    if(!state.focused) hidePoint();
+  });
+  hit.addEventListener('focus', () => {
+    state.focused = true;
+    showPoint(state.index || 0);
+  });
+  hit.addEventListener('blur', () => {
+    state.focused = false;
+    state.pointer = false;
+    hidePoint();
+  });
+  hit.addEventListener('keydown', event => {
+    let next = state.index;
+    if(event.key === 'ArrowRight' || event.key === 'ArrowUp') next += 1;
+    else if(event.key === 'ArrowLeft' || event.key === 'ArrowDown') next -= 1;
+    else if(event.key === 'Home') next = 0;
+    else if(event.key === 'End') next = points.length - 1;
+    else if(event.key === 'Escape'){
+      hidePoint();
+      return;
+    } else return;
+    event.preventDefault();
+    state.pointer = false;
+    showPoint(next);
+  });
+
+  if(state.visible && (state.pointer || state.focused)) showPoint(state.index);
 }
 
 function renderPerformance(d){
   const history = d.recentReleases.filter(r => r.importDurationSeconds > 0).slice(0, 8);
   let html = '';
   const grouped = {};
+  const chartData = [];
+  const chartKeys = [];
   for(const point of (d.importHistory||[])) (grouped[point.collection] ||= []).push(point);
-  const graphs = Object.entries(grouped).map(([collection,points])=>{
-    const values=points.map(p=>p.recordsPerSecond), max=Math.max(...values,1);
-    const coords=values.map((v,i)=>`${values.length===1?50:i/(values.length-1)*100},${78-v/max*68}`);
-    const weighted=points.reduce((s,p)=>s+p.recordsPerSecond*p.sampleSeconds,0)/Math.max(1,points.reduce((s,p)=>s+p.sampleSeconds,0));
-    const area=`0,78 ${coords.join(' ')} 100,78`;
-    return `<div class="perf-item perf-layout"><div><b>${escapeHtml(collection)} · letzte 12 Std.</b>
-      <div class="big">Ø ${fmt(Math.round(weighted))} Records/s</div>
-      <div class="small">5-Minuten-Fenster · Spitze ${fmt(Math.round(max))}</div></div>
-      <svg class="spark" viewBox="0 0 100 82" preserveAspectRatio="none" role="img" aria-label="Importgeschwindigkeit der letzten 12 Stunden">
-        <line class="axis" x1="0" y1="78" x2="100" y2="78"/><polygon class="area" points="${area}"/><polyline class="line" points="${coords.join(' ')}"/>
-      </svg></div>`;
+  const graphs = Object.entries(grouped).map(([collection,points], chartIndex)=>{
+    const values = points.map(point => point.recordsPerSecond);
+    const max = Math.max(...values, 1);
+    const chartPoints = points.map((point, index) => ({
+      x: points.length === 1 ? 50 : index / (points.length - 1) * 100,
+      y: 78 - point.recordsPerSecond / max * 68,
+      bucketStart: point.bucketStart,
+      recordsPerSecond: point.recordsPerSecond,
+      bytesPerSecond: point.bytesPerSecond
+    }));
+    const coords = chartPoints.map(point => point.x + ',' + point.y);
+    const weighted = points.reduce((sum, point) => sum + point.recordsPerSecond * point.sampleSeconds, 0) /
+      Math.max(1, points.reduce((sum, point) => sum + point.sampleSeconds, 0));
+    const area = '0,78 ' + coords.join(' ') + ' 100,78';
+    chartData.push(chartPoints);
+    chartKeys.push(collection);
+    return '<div class="perf-item perf-layout"><div><b>' + escapeHtml(collection) +
+      ' · letzte 12 Std.</b><div class="big">Ø ' + fmt(Math.round(weighted)) +
+      ' Records/s</div><div class="small">5-Minuten-Fenster · Spitze ' +
+      fmt(Math.round(max)) + '</div></div><div class="spark-wrap">' +
+      '<svg class="spark" data-spark-chart="' + String(chartIndex) +
+      '" viewBox="0 0 100 82" preserveAspectRatio="none" role="group" ' +
+      'aria-label="Importgeschwindigkeit der letzten 12 Stunden. Mit Maus, Touch oder Pfeiltasten einen Zeitpunkt auswählen.">' +
+      '<line class="axis" x1="0" y1="78" x2="100" y2="78"/>' +
+      '<polygon class="area" points="' + area + '"/>' +
+      '<polyline class="line" points="' + coords.join(' ') + '"/>' +
+      '<line class="focus-line" x1="0" y1="8" x2="0" y2="78"/>' +
+      '<circle class="focus-point" cx="0" cy="78" r="2.8"/>' +
+      '<rect class="hit-area" x="0" y="0" width="100" height="82" tabindex="0" role="slider" ' +
+      'aria-label="Importgeschwindigkeit auswählen" aria-valuemin="0" aria-valuemax="' +
+      String(chartPoints.length - 1) + '" aria-valuenow="0" aria-valuetext="Datenpunkt auswählen"/>' +
+      '</svg><div class="spark-tooltip" hidden role="status"></div></div></div>';
   }).join('');
   if(graphs) html += `<div class="perf-grid" style="grid-template-columns:1fr">${graphs}</div>`;
   if(history.length){
@@ -617,8 +798,12 @@ function renderPerformance(d){
           <td class="num">${scaleBytes(m.bytesPerSecond)}/s</td></tr>`;
       }).join('') + '</tbody></table>';
   }
-  document.getElementById('performance').innerHTML = html ||
+  const performance = document.getElementById('performance');
+  performance.innerHTML = html ||
     '<div class="idle">Noch keine Import-Messwerte vorhanden. Sie werden ab dem nächsten Import-Start aufgezeichnet.</div>';
+  performance.querySelectorAll('[data-spark-chart]').forEach((svg, index) => {
+    initSparkline(svg, chartData[index], chartKeys[index]);
+  });
 }
 
 function discardReasonLabel(reason){
@@ -659,7 +844,7 @@ function renderDiscardAnalysis(d){
     return;
   }
   const knownTotal = analysis.reduce((sum, item)=>sum+item.count, 0);
-  document.getElementById('filter-analysis').innerHTML = filterHtml + '<details style="margin-top:12px"><summary>Alle Filtergründe und Beispiele</summary>' + analysis.map(item=>{
+  document.getElementById('filter-analysis').innerHTML = filterHtml + '<details data-detail-key="filter-analysis" style="margin-top:12px"><summary>Alle Filtergründe und Beispiele</summary>' + analysis.map(item=>{
     const percent = knownTotal ? item.count/knownTotal*100 : 0;
     const samples = (item.samples||[]).map(sample=>{
       const title = sample.title || '(kein Titel)';
@@ -671,7 +856,7 @@ function renderDiscardAnalysis(d){
     return `<div class="reason-row"><div class="reason-head"><b>${escapeHtml(discardReasonLabel(item.reason))}</b>
       <span><b>${fmt(item.count)}</b> <span class="small">(${percent.toFixed(1)}%)</span></span></div>
       <div class="bar"><div style="width:${Math.max(percent,.4)}%;background:var(--warn)"></div></div>
-      ${samples ? `<details><summary>${item.samples.length} Beispiel${item.samples.length===1?'':'e'} anzeigen</summary>${samples}</details>` : ''}</div>`;
+      ${samples ? `<details data-detail-key="filter-samples-${encodeURIComponent(String(item.reason))}"><summary>${item.samples.length} Beispiel${item.samples.length===1?'':'e'} anzeigen</summary>${samples}</details>` : ''}</div>`;
   }).join('') + '</details>';
 }
 

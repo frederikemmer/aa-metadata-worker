@@ -48,6 +48,18 @@ class TestSyncStatusJson:
         }
         assert sum(item["share"] for item in body["collectionBreakdown"]) == 1
 
+    def test_performance_chart_has_interactive_detail_surface(self, client):
+        response = client.get("/dashboard")
+        assert response.status_code == 200
+        for fragment in (
+            "spark-wrap",
+            "hit-area",
+            "spark-tooltip",
+            "pointermove",
+            "Pfeiltasten",
+        ):
+            assert fragment in response.text
+
     def test_inactive_release_is_hidden(self, client, db_conn):
         db_conn.execute(
             """
@@ -304,6 +316,10 @@ class TestDashboardHtml:
         assert "<h2>Releases</h2>" in html
         assert "active-details" in html
         assert "release-logs" in html
+        assert "captureDetailsOpenState" in html
+        assert "restoreDetailsOpenState" in html
+        assert 'data-detail-key="filter-analysis"' in html
+        assert 'data-detail-key="release-logs"' in html
         assert "poll-cadence" not in html
         assert "<h2>Status</h2>" not in html
         assert "Gespeicherte Importdateien" not in html
