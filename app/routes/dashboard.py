@@ -29,7 +29,7 @@ router = APIRouter(tags=["dashboard"])
 
 WORK_DIR = "/work/sync"
 _COLLECTION_COUNT_CACHE_TTL_SECONDS = 60.0
-_COLLECTION_COUNT_QUERY_TIMEOUT = "60s"
+_COLLECTION_COUNT_QUERY_TIMEOUT = "30min"
 _collection_count_cache_lock = Lock()
 _collection_count_cache: tuple[
     tuple[tuple[str, ...], str | None], float, datetime, dict[str, int]
@@ -141,12 +141,16 @@ def _current_collection_counts(
 
         if _collection_count_refresh_key is None:
             _collection_count_refresh_key = cache_key
-            Thread(
-                target=_refresh_collection_counts,
-                args=(settings, cache_key),
-                name="dashboard-collection-count",
-                daemon=True,
-            ).start()
+            try:
+                Thread(
+                    target=_refresh_collection_counts,
+                    args=(settings, cache_key),
+                    name="dashboard-collection-count",
+                    daemon=True,
+                ).start()
+            except Exception:  # noqa: BLE001 - status must stay available
+                _collection_count_refresh_key = None
+                logger.exception("Could not start background collection count")
 
     # A same-release refresh may use the last exact snapshot while the new
     # snapshot is calculated.  Its timestamp makes that age visible in the UI.
