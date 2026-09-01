@@ -3,28 +3,42 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.routes import dashboard as dashboard_routes
 from common.db import close_pool
+
+
+def _status_with_breakdown(client):
+    deadline = monotonic() + 5
+    while True:
+        body = client.get("/api/v1/sync/status").json()
+        if body["collectionBreakdownAvailable"]:
+            return body
+        if monotonic() >= deadline:
+            pytest.fail("exact collection breakdown did not become available")
+        sleep(0.05)
 
 
 @pytest.fixture()
 def client(db_conn):
+    dashboard_routes._reset_collection_count_cache()
     close_pool()
     app = create_app()
     with TestClient(app) as test_client:
         yield test_client
+    dashboard_routes._reset_collection_count_cache()
     close_pool()
 
 
 class TestSyncStatusJson:
     def test_shape_empty_db(self, client):
-        response = client.get("/api/v1/sync/status")
-        assert response.status_code == 200
-        body = response.json()
+        body = _status_with_breakdown(client)
         for key in (
             "ready", "appVersion", "records", "databaseSizeBytes", "diskFreeBytes",
             "storageWarnGib", "storageStopGib", "activeSync",
@@ -72,7 +86,7 @@ class TestSyncStatusJson:
             """
         )
 
-        body = client.get("/api/v1/sync/status").json()
+        body = _status_with_breakdown(client)
         breakdown = {item["collection"]: item for item in body["collectionBreakdown"]}
 
         assert body["records"] == 4
@@ -87,6 +101,31 @@ class TestSyncStatusJson:
         assert breakdown["upload_records"]["estimatedDatabaseBytes"] == round(
             body["databaseSizeBytes"] / 2
         )
+
+    def test_collection_breakdown_refresh_does_not_block_status(
+        self, client, monkeypatch
+    ):
+        entered = Event()
+        release = Event()
+
+        def blocked_refresh(settings, cache_key):
+            entered.set()
+            release.wait(timeout=2)
+
+        monkeypatch.setattr(
+            dashboard_routes, "_refresh_collection_counts", blocked_refresh
+        )
+        dashboard_routes._reset_collection_count_cache()
+
+        started = monotonic()
+        response = client.get("/api/v1/sync/status")
+        elapsed = monotonic() - started
+        try:
+            assert response.status_code == 200
+            assert elapsed < 2
+            assert entered.wait(timeout=1)
+        finally:
+            release.set()
 
     def test_performance_chart_has_interactive_detail_surface(self, client):
         response = client.get("/dashboard")

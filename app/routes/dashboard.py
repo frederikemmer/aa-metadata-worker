@@ -13,7 +13,7 @@ import os
 import pathlib
 import shutil
 from datetime import UTC, datetime
-from threading import Lock
+from threading import Lock, Thread
 from time import monotonic
 
 import psycopg
@@ -22,17 +22,19 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.deps import GetConnectionDependency, GetSettingsDependency
 from common.config import Settings
-from common.db import estimated_count, list_migrations
+from common.db import connect, estimated_count, list_migrations
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["dashboard"])
 
 WORK_DIR = "/work/sync"
 _COLLECTION_COUNT_CACHE_TTL_SECONDS = 60.0
+_COLLECTION_COUNT_QUERY_TIMEOUT = "60s"
 _collection_count_cache_lock = Lock()
 _collection_count_cache: tuple[
-    tuple[int, tuple[str, ...], str | None], float, datetime, dict[str, int]
+    tuple[tuple[str, ...], str | None], float, datetime, dict[str, int]
 ] | None = None
+_collection_count_refresh_key: tuple[tuple[str, ...], str | None] | None = None
 
 _RELEASE_SUMMARY_SQL = """
 SELECT collection, release_identifier, status, data_size_bytes,
@@ -57,26 +59,73 @@ FROM sync_releases
 """
 
 
+def _refresh_collection_counts(
+    settings: Settings,
+    cache_key: tuple[tuple[str, ...], str | None],
+) -> None:
+    """Calculate exact provenance counts without blocking status requests."""
+    global _collection_count_cache, _collection_count_refresh_key
+
+    counts: dict[str, int] | None = None
+    calculated_at: datetime | None = None
+    try:
+        exact_conn = connect(settings, autocommit=True)
+        try:
+            # This runs outside the API pool.  A large full-table aggregate may
+            # take longer than the normal request budget, but must not hold the
+            # dashboard status endpoint open indefinitely.
+            exact_conn.execute(
+                f"SET statement_timeout = '{_COLLECTION_COUNT_QUERY_TIMEOUT}'"
+            )
+            rows = exact_conn.execute(
+                """
+                SELECT source_collection, COUNT(*)::bigint
+                FROM metadata_records
+                GROUP BY source_collection
+                ORDER BY source_collection
+                """
+            ).fetchall()
+            counts = {str(row[0]): int(row[1]) for row in rows}
+            calculated_at = datetime.now(UTC)
+        finally:
+            exact_conn.close()
+    except psycopg.errors.QueryCanceled:
+        logger.warning(
+            "Background exact metadata_records collection count hit statement_timeout"
+        )
+    except Exception:  # noqa: BLE001 - a metrics refresh must not affect the API
+        logger.exception("Background exact metadata_records collection count failed")
+    finally:
+        with _collection_count_cache_lock:
+            if _collection_count_refresh_key == cache_key:
+                if counts is not None and calculated_at is not None:
+                    _collection_count_cache = (
+                        cache_key,
+                        monotonic(),
+                        calculated_at,
+                        counts,
+                    )
+                _collection_count_refresh_key = None
+
+
 def _current_collection_counts(
-    conn: psycopg.Connection,
-    configured_collections: list[str],
+    settings: Settings,
     freshness_key: str | None,
 ) -> tuple[dict[str, int], datetime] | None:
-    """Return exact row counts by current record provenance.
+    """Return cached exact row counts and refresh them asynchronously.
 
     The dashboard is polled every few seconds, so cache the full-table grouped
     count briefly.  A completed sync changes ``freshness_key`` and forces a
-    fresh count on the next request.  If the grouped query times out, return
-    no breakdown instead of fabricating a zero share from release counters.
+    fresh count on the next request.  The first request after startup (or a
+    completed sync) starts the full-table aggregate in a daemon thread and
+    returns immediately.  If no exact result is available, callers must hide
+    the breakdown instead of fabricating a zero share from release counters.
     """
-    global _collection_count_cache
+    global _collection_count_refresh_key
 
-    cache_key = (
-        int(conn.info.backend_pid),
-        tuple(configured_collections),
-        freshness_key,
-    )
+    cache_key = (tuple(settings.aa_collections), freshness_key)
     now = monotonic()
+    stale_result: tuple[dict[str, int], datetime] | None = None
     with _collection_count_cache_lock:
         if _collection_count_cache:
             (
@@ -85,32 +134,31 @@ def _current_collection_counts(
                 calculated_at,
                 cached_counts,
             ) = _collection_count_cache
-            if (
-                cached_key == cache_key
-                and now - cached_monotonic < _COLLECTION_COUNT_CACHE_TTL_SECONDS
-            ):
-                return dict(cached_counts), calculated_at
+            if cached_key == cache_key:
+                stale_result = (dict(cached_counts), calculated_at)
+                if now - cached_monotonic < _COLLECTION_COUNT_CACHE_TTL_SECONDS:
+                    return stale_result
 
-        try:
-            rows = conn.execute(
-                """
-                SELECT source_collection, COUNT(*)::bigint
-                FROM metadata_records
-                GROUP BY source_collection
-                ORDER BY source_collection
-                """
-            ).fetchall()
-        except psycopg.errors.QueryCanceled:
-            logger.warning(
-                "Exact metadata_records collection count hit statement_timeout; "
-                "hiding the unavailable breakdown"
-            )
-            return None
+        if _collection_count_refresh_key is None:
+            _collection_count_refresh_key = cache_key
+            Thread(
+                target=_refresh_collection_counts,
+                args=(settings, cache_key),
+                name="dashboard-collection-count",
+                daemon=True,
+            ).start()
 
-        counts = {str(row[0]): int(row[1]) for row in rows}
-        calculated_at = datetime.now(UTC)
-        _collection_count_cache = (cache_key, now, calculated_at, counts)
-        return dict(counts), calculated_at
+    # A same-release refresh may use the last exact snapshot while the new
+    # snapshot is calculated.  Its timestamp makes that age visible in the UI.
+    return stale_result
+
+
+def _reset_collection_count_cache() -> None:
+    """Reset the process-local count cache (used by isolated API tests)."""
+    global _collection_count_cache, _collection_count_refresh_key
+    with _collection_count_cache_lock:
+        _collection_count_cache = None
+        _collection_count_refresh_key = None
 
 
 @router.get("/api/v1/sync/status")
@@ -173,11 +221,7 @@ def sync_status(
         "SELECT to_char(MAX(completed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSOF') FROM sync_releases "
         "WHERE status='completed'"
     ).fetchone()
-    collection_counts_result = _current_collection_counts(
-        conn,
-        active_collections,
-        last_sync_row[0],
-    )
+    collection_counts_result = _current_collection_counts(settings, last_sync_row[0])
     if collection_counts_result is None:
         records_row = estimated_count(conn, "metadata_records")
         collection_breakdown_calculated_at = None

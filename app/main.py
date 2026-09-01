@@ -134,7 +134,7 @@ def create_app() -> FastAPI:
     settings = load_settings()
     app = FastAPI(
         title="AA Metadata Worker API",
-        version="1.0.1",
+        version="1.0.2",
         description=(
             "Local book-metadata search index built from Anna's Archive public "
             "metadata datasets (AAC). Metadata-only: no book files are hosted, "
