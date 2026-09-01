@@ -236,6 +236,7 @@
 <script>
 const fmt = n => (n ?? 0).toLocaleString('de-DE');
 const gib = b => ((b||0)/1073741824).toFixed(2)+' GiB';
+const sharePct = n => ((n||0)*100).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';
 const scaleBytes = b => {
   const u = ['B','KiB','MiB','GiB','TiB']; let i = 0;
   while (b >= 1024 && i < u.length-1){ b /= 1024; i++; }
@@ -519,8 +520,18 @@ function render(d){
   if (!appVersion || appVersion !== d.appVersion){ appVersion = d.appVersion; renderVersion(); }
   const colors=['#4aa3e0','#8b6fd9','#3fb96f','#e2b93b','#d972a7'];
   const breakdown=d.collectionBreakdown||[];
-  const segments=breakdown.map((item,i)=>`<div class="stack-segment" style="width:${(item.share*100).toFixed(2)}%;background:${colors[i%colors.length]}" title="${escapeHtml(item.collection)} · ${fmt(item.estimatedRecords)} Datensätze · ca. ${gib(item.estimatedDatabaseBytes)}"></div>`).join('');
-  const legend=breakdown.map((item,i)=>`<span class="small"><i class="legend-dot" style="background:${colors[i%colors.length]}"></i>${escapeHtml(item.collection)} · ${fmt(item.estimatedRecords)}</span>`).join('');
+  const breakdownAvailable=d.collectionBreakdownAvailable!==false;
+  const hasBreakdownRecords=breakdown.some(item=>(item.estimatedRecords||0)>0);
+  const segments=breakdownAvailable&&hasBreakdownRecords
+    ? breakdown.map((item,i)=>`<div class="stack-segment" style="width:${(item.share*100).toFixed(2)}%;background:${colors[i%colors.length]}" title="${escapeHtml(item.collection)} · ${fmt(item.estimatedRecords)} Datensätze · ${sharePct(item.share)} · ca. ${gib(item.estimatedDatabaseBytes)}"></div>`).join('')
+    : '';
+  const legend=!breakdownAvailable
+    ? '<span class="small">Aufteilung momentan nicht verfügbar; der übrige Status ist weiterhin aktuell.</span>'
+    : hasBreakdownRecords
+      ? breakdown.map((item,i)=>`<span class="small"><i class="legend-dot" style="background:${colors[i%colors.length]}"></i>${escapeHtml(item.collection)} · ${fmt(item.estimatedRecords)} · ${sharePct(item.share)}</span>`).join('')
+      : '<span class="small">Keine Datensätze für eine Aufteilung vorhanden.</span>';
+  const breakdownStand=d.collectionBreakdownCalculatedAt
+    ? `Stand Aufteilung: ${new Date(d.collectionBreakdownCalculatedAt).toLocaleTimeString('de-DE')}` : '';
   document.getElementById('cards').innerHTML = `
     <div class="card"><h2>Bestand</h2><div class="metric-row">
       <div class="metric-cell"><div class="metric-label">Datensätze</div><div class="metric-value">${fmt(d.records)}</div></div>
@@ -528,9 +539,10 @@ function render(d){
       <div class="metric-cell"><div class="metric-label">Releases</div><div class="metric-value">${fmt(d.releasesTracked)}</div></div>
       </div><div class="small" style="margin-top:9px">zuletzt synchronisiert: ${d.lastSuccessfulSync || '–'}</div></div>
     <div class="card"><h2>Datenbank</h2><div class="big">${gib(d.databaseSizeBytes)}</div>
-      <div class="stack-bar" aria-label="Geschätzte Datenbankaufteilung nach Collection">${segments}</div>
+      <div class="small" style="margin-top:5px">Anteil nach aktuell gespeicherten Datensätzen (Provenienz); Speicherplatz proportional geschätzt.</div>
+      <div class="stack-bar" aria-label="Datenbankaufteilung nach aktuell gespeicherten Datensätzen">${segments}</div>
       <div class="stack-legend">${legend}</div>
-      <div class="small" style="margin-top:7px">geschätzte Aufteilung · frei ${gib(d.diskFreeBytes)} · Stopp bei ${d.storageStopGib} GiB</div></div>`;
+      <div class="small" style="margin-top:7px">${breakdownStand}${breakdownStand?' · ':''}frei ${gib(d.diskFreeBytes)} · Stopp bei ${d.storageStopGib} GiB</div></div>`;
 
   // Alle aktiven Downloads/Imports – bei Parallel-Downloads mehrere Blöcke.
   const actives = d.collections.filter(c =>

@@ -8,10 +8,13 @@ works across container boundaries.
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import shutil
 from datetime import UTC, datetime
+from threading import Lock
+from time import monotonic
 
 import psycopg
 from fastapi import APIRouter
@@ -21,9 +24,15 @@ from app.deps import GetConnectionDependency, GetSettingsDependency
 from common.config import Settings
 from common.db import estimated_count, list_migrations
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["dashboard"])
 
 WORK_DIR = "/work/sync"
+_COLLECTION_COUNT_CACHE_TTL_SECONDS = 60.0
+_collection_count_cache_lock = Lock()
+_collection_count_cache: tuple[
+    tuple[int, tuple[str, ...], str | None], float, datetime, dict[str, int]
+] | None = None
 
 _RELEASE_SUMMARY_SQL = """
 SELECT collection, release_identifier, status, data_size_bytes,
@@ -46,6 +55,62 @@ SELECT collection, release_identifier, status, data_size_bytes,
        to_char(completed_at, 'YYYY-MM-DD HH24:MI:SS') AS completed
 FROM sync_releases
 """
+
+
+def _current_collection_counts(
+    conn: psycopg.Connection,
+    configured_collections: list[str],
+    freshness_key: str | None,
+) -> tuple[dict[str, int], datetime] | None:
+    """Return exact row counts by current record provenance.
+
+    The dashboard is polled every few seconds, so cache the full-table grouped
+    count briefly.  A completed sync changes ``freshness_key`` and forces a
+    fresh count on the next request.  If the grouped query times out, return
+    no breakdown instead of fabricating a zero share from release counters.
+    """
+    global _collection_count_cache
+
+    cache_key = (
+        int(conn.info.backend_pid),
+        tuple(configured_collections),
+        freshness_key,
+    )
+    now = monotonic()
+    with _collection_count_cache_lock:
+        if _collection_count_cache:
+            (
+                cached_key,
+                cached_monotonic,
+                calculated_at,
+                cached_counts,
+            ) = _collection_count_cache
+            if (
+                cached_key == cache_key
+                and now - cached_monotonic < _COLLECTION_COUNT_CACHE_TTL_SECONDS
+            ):
+                return dict(cached_counts), calculated_at
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT source_collection, COUNT(*)::bigint
+                FROM metadata_records
+                GROUP BY source_collection
+                ORDER BY source_collection
+                """
+            ).fetchall()
+        except psycopg.errors.QueryCanceled:
+            logger.warning(
+                "Exact metadata_records collection count hit statement_timeout; "
+                "hiding the unavailable breakdown"
+            )
+            return None
+
+        counts = {str(row[0]): int(row[1]) for row in rows}
+        calculated_at = datetime.now(UTC)
+        _collection_count_cache = (cache_key, now, calculated_at, counts)
+        return dict(counts), calculated_at
 
 
 @router.get("/api/v1/sync/status")
@@ -102,15 +167,23 @@ def sync_status(
         "FROM sync_releases WHERE collection = ANY(%s)",
         (active_collections,),
     ).fetchone()
-    # The dashboard refreshes frequently. Never make every poll wait for a
-    # potentially multi-second COUNT(*) scan of the large metadata table.
-    records_row = estimated_count(conn, "metadata_records")
     db_size_row = conn.execute("SELECT pg_database_size(current_database())").fetchone()
     version_row = conn.execute("SELECT COALESCE((SELECT MAX(version) FROM schema_migrations), 0)").fetchone()
     last_sync_row = conn.execute(
         "SELECT to_char(MAX(completed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSOF') FROM sync_releases "
         "WHERE status='completed'"
     ).fetchone()
+    collection_counts_result = _current_collection_counts(
+        conn,
+        active_collections,
+        last_sync_row[0],
+    )
+    if collection_counts_result is None:
+        records_row = estimated_count(conn, "metadata_records")
+        collection_breakdown_calculated_at = None
+    else:
+        collection_counts, collection_breakdown_calculated_at = collection_counts_result
+        records_row = sum(collection_counts.values())
     discard_reason_rows = conn.execute(
         "SELECT reason.key, SUM(reason.value::bigint) "
         "FROM sync_releases, LATERAL jsonb_each_text(discard_reasons) AS reason "
@@ -326,24 +399,23 @@ def sync_status(
     assert db_size_row and version_row and totals_row and last_sync_row
     migrations = list_migrations()
     ready = bool(migrations) and int(version_row[0]) >= migrations[-1][0]
-    collection_weights = []
-    for name in active_collections:
-        latest = latest_by_collection.get(name)
-        inserted = int(latest[9]) if latest else 0
-        collection_weights.append((name, max(inserted, 0)))
-    weight_total = sum(weight for _name, weight in collection_weights)
-    if weight_total <= 0:
-        collection_weights = [(name, 1) for name in active_collections]
-        weight_total = max(len(collection_weights), 1)
-    collection_breakdown = [
-        {
-            "collection": name,
-            "estimatedRecords": round(int(records_row) * weight / weight_total),
-            "estimatedDatabaseBytes": round(int(db_size_row[0]) * weight / weight_total),
-            "share": weight / weight_total,
-        }
-        for name, weight in collection_weights
-    ]
+    if collection_counts_result is None:
+        collection_breakdown = []
+    else:
+        breakdown_names = list(dict.fromkeys([*active_collections, *collection_counts]))
+        record_total = sum(collection_counts.values())
+        collection_breakdown = [
+            {
+                "collection": name,
+                "estimatedRecords": collection_counts.get(name, 0),
+                "estimatedDatabaseBytes": (
+                    round(int(db_size_row[0]) * collection_counts.get(name, 0) / record_total)
+                    if record_total else 0
+                ),
+                "share": collection_counts.get(name, 0) / record_total if record_total else 0,
+            }
+            for name in breakdown_names
+        ]
 
     return {
         "ready": ready,
@@ -353,6 +425,11 @@ def sync_status(
         "lastSuccessfulSync": last_sync_row[0],
         "databaseSizeBytes": int(db_size_row[0]),
         "collectionBreakdown": collection_breakdown,
+        "collectionBreakdownAvailable": collection_counts_result is not None,
+        "collectionBreakdownCalculatedAt": (
+            collection_breakdown_calculated_at.isoformat()
+            if collection_breakdown_calculated_at is not None else None
+        ),
         "diskFreeBytes": int(disk_free),
         "storageWarnGib": settings.storage_warn_gib,
         "storageStopGib": settings.storage_stop_gib,

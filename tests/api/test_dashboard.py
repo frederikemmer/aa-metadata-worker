@@ -46,7 +46,47 @@ class TestSyncStatusJson:
         assert {item["collection"] for item in body["collectionBreakdown"]} == {
             "zlib3_records", "upload_records"
         }
-        assert sum(item["share"] for item in body["collectionBreakdown"]) == 1
+        assert body["collectionBreakdownAvailable"] is True
+        assert body["records"] == 0
+        assert sum(item["share"] for item in body["collectionBreakdown"]) == 0
+
+    def test_collection_breakdown_uses_current_record_provenance(
+        self, client, db_conn
+    ):
+        db_conn.execute(
+            """
+            INSERT INTO metadata_records (md5, source_collection, search_tsv)
+            VALUES
+                (decode('00000000000000000000000000000001', 'hex'), 'zlib3_records', ''::tsvector),
+                (decode('00000000000000000000000000000002', 'hex'), 'zlib3_records', ''::tsvector),
+                (decode('00000000000000000000000000000003', 'hex'), 'upload_records', ''::tsvector),
+                (decode('00000000000000000000000000000004', 'hex'), 'upload_records', ''::tsvector)
+            """
+        )
+        db_conn.execute(
+            """
+            INSERT INTO sync_releases
+                (collection, release_identifier, status, records_inserted,
+                 records_updated, completed_at, discovered_at)
+            VALUES ('upload_records', 'latest', 'completed', 0, 2, now(), now())
+            """
+        )
+
+        body = client.get("/api/v1/sync/status").json()
+        breakdown = {item["collection"]: item for item in body["collectionBreakdown"]}
+
+        assert body["records"] == 4
+        assert body["collectionBreakdownAvailable"] is True
+        assert breakdown["zlib3_records"]["estimatedRecords"] == 2
+        assert breakdown["upload_records"]["estimatedRecords"] == 2
+        assert breakdown["zlib3_records"]["share"] == 0.5
+        assert breakdown["upload_records"]["share"] == 0.5
+        assert breakdown["zlib3_records"]["estimatedDatabaseBytes"] == round(
+            body["databaseSizeBytes"] / 2
+        )
+        assert breakdown["upload_records"]["estimatedDatabaseBytes"] == round(
+            body["databaseSizeBytes"] / 2
+        )
 
     def test_performance_chart_has_interactive_detail_surface(self, client):
         response = client.get("/dashboard")
@@ -313,6 +353,8 @@ class TestDashboardHtml:
         assert "Subcollection-Filter hinzufügen" in html
         assert "toggle-track" in html
         assert "Werte neu auswerten" in html
+        assert "aktuell gespeicherten Datensätzen (Provenienz)" in html
+        assert "collectionBreakdownAvailable" in html
         assert "<h2>Releases</h2>" in html
         assert "active-details" in html
         assert "release-logs" in html
